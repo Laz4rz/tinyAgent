@@ -243,7 +243,7 @@ def test_controls_gui() -> None:
         _wait_for(root, lambda: root.focus_get() is entry)
 
         pyautogui.write("abc", interval=0)
-        press_combo("ctrl", "a", hold_ms=20)
+        press_combo("mod", "a", hold_ms=20)
         pyautogui.write("success", interval=0)
         _wait_for(root, lambda: entry.get() == "success")
 

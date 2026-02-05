@@ -1,4 +1,5 @@
 import time
+import sys
 import pyautogui
 
 
@@ -39,6 +40,8 @@ def press_combo(*keys: str, hold_ms: int = 0) -> str:
 
     Args:
         *keys: Key names understood by pyautogui (e.g., "ctrl", "shift", "a").
+            You can also use "mod" as a cross-platform alias for the primary
+            shortcut modifier ("command" on macOS, "ctrl" elsewhere).
         hold_ms: Milliseconds to hold keys down before releasing.
 
     Example:
@@ -48,6 +51,10 @@ def press_combo(*keys: str, hold_ms: int = 0) -> str:
     try:
         for key in keys:
             lowered = key.lower()
+            if lowered == "mod":
+                lowered = "command" if sys.platform == "darwin" else "ctrl"
+            elif lowered == "cmd":
+                lowered = "command"
             pyautogui.keyDown(lowered)
             pressed.append(lowered)
         if hold_ms:
