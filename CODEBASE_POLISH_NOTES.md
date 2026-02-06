@@ -97,7 +97,7 @@ For interactive computer-use sessions:
 7. Keep a runtime command to re-run setup and persist new config without restarting the process.
 8. Ensure picker key handling works on both POSIX terminals and Windows consoles; keep non-TTY fallback prompts.
 9. In setup, start with all tools selected by default so users can deselect instead of opt-in one by one.
-10. Keep runtime output role-oriented and easy to scan: use `model` for model text/tool requests, and keep tool/protocol/control notes as `user` with bracketed tags like `[tool-response]` or `[protocol]`.
+10. Keep runtime output role-oriented and easy to scan: use clear role-prefixed lines (for example `agent › ...`, `you › ...`), and render tool/protocol/control/thinking/status notes as visually emphasized semantic tags.
 11. Keep a `/clean` runtime command that clears local conversation history without restarting the process.
 12. For Gemini responses in tool mode, extract text directly from response parts instead of relying on `response.text` warnings.
 13. Keep setup/config wizard logic in a dedicated setup module so `main.py` stays focused on session orchestration and the interaction loop.

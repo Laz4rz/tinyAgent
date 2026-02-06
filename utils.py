@@ -37,6 +37,12 @@ STYLE_INFO = "\033[38;5;111m"
 STYLE_SUCCESS = "\033[38;5;82m"
 STYLE_WARNING = "\033[38;5;214m"
 STYLE_ERROR = "\033[38;5;203m"
+STYLE_SEMANTIC_THINKING = "\033[1;38;5;219m"
+STYLE_SEMANTIC_TOOL_REQUEST = "\033[1;38;5;117m"
+STYLE_SEMANTIC_TOOL_RESULT = "\033[1;38;5;149m"
+STYLE_SEMANTIC_PROTOCOL = "\033[1;38;5;214m"
+STYLE_SEMANTIC_CONTROL = "\033[1;38;5;208m"
+STYLE_SEMANTIC_STATUS = "\033[1;38;5;111m"
 COLOR_ENABLED = False
 _PENDING_MODEL_WAITING_LINE = False
 
@@ -79,7 +85,30 @@ def _clear_pending_model_waiting_line() -> None:
 
 
 def role_label(role: RoleName) -> str:
-    return _style(ROLE_TITLES[role], ROLE_COLORS[role])
+    return _style(f"{ROLE_TITLES[role]} ›", ROLE_COLORS[role])
+
+
+def _render_semantic_prefix(line: str) -> str:
+    normalized = line.lstrip()
+    lower = normalized.lower()
+    semantic_prefixes = [
+        ("tool request:", STYLE_SEMANTIC_TOOL_REQUEST),
+        ("tool result:", STYLE_SEMANTIC_TOOL_RESULT),
+        ("thinking:", STYLE_SEMANTIC_THINKING),
+        ("protocol:", STYLE_SEMANTIC_PROTOCOL),
+        ("control:", STYLE_SEMANTIC_CONTROL),
+        ("status:", STYLE_SEMANTIC_STATUS),
+    ]
+
+    for prefix, style in semantic_prefixes:
+        if not lower.startswith(prefix):
+            continue
+        remainder = normalized[len(prefix) :].lstrip()
+        label = _style(f"{prefix[:-1].upper()}:", style)
+        if remainder:
+            return f"{label} {remainder}"
+        return label
+    return line
 
 
 def print_section(title: str) -> None:
@@ -90,10 +119,9 @@ def print_section(title: str) -> None:
 def print_role(role: RoleName, text: str) -> None:
     _clear_pending_model_waiting_line()
     lines = text.splitlines() or [""]
-    marker = _style("●", ROLE_COLORS[role])
-    print(f"\n{marker} {role_label(role)}  {lines[0]}")
+    print(f"\n{role_label(role)} {_render_semantic_prefix(lines[0])}")
     for line in lines[1:]:
-        print(f"   {line}")
+        print(f"  {line}")
 
 
 def emit_message(target: TextSink, *, role: RoleName, text: str) -> None:
@@ -126,12 +154,11 @@ def print_model_waiting() -> None:
     _clear_pending_model_waiting_line()
 
     if not sys.stdout.isatty():
-        print_role("model", "thinking...")
+        print_role("model", "status: thinking...")
         return
 
-    marker = _style("●", ROLE_COLORS["model"])
-    waiting = _style("thinking...", STYLE_INFO)
-    print(f"\n{marker} {role_label('model')}  {waiting}", end="", flush=True)
+    waiting = _render_semantic_prefix("status: thinking...")
+    print(f"\n{role_label('model')} {waiting}", end="", flush=True)
     _PENDING_MODEL_WAITING_LINE = True
 
 
@@ -193,23 +220,23 @@ def run_tool(tool_fn: ToolFn, args: dict[str, Any]) -> str:
 
 
 def format_tool_request(name: str, args: dict[str, Any]) -> str:
-    return f"tool request · {name} {json.dumps(args, ensure_ascii=False)}"
+    return f"tool request: {name} {json.dumps(args, ensure_ascii=False)}"
 
 
 def format_tool_result(name: str, result: str) -> str:
-    return f"tool result · {name}: {result}"
+    return f"tool result: {name}: {result}"
 
 
 def format_protocol_note(text: str) -> str:
-    return f"protocol · {text}"
+    return f"protocol: {text}"
 
 
 def format_control_note(text: str) -> str:
-    return f"control · {text}"
+    return f"control: {text}"
 
 
 def format_thinking_summary(text: str) -> str:
-    return f"thinking · {text}"
+    return f"thinking: {text}"
 
 
 def parse_main_cli_args(argv: list[str]) -> MainCliArgs:
