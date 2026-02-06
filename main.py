@@ -34,11 +34,13 @@ from utils import (
     print_error,
     print_info,
     print_role,
+    print_role_group,
     print_section,
     print_session_help,
     print_session_status,
     print_model_waiting,
     parse_main_cli_args,
+    print_user_input_boundary,
     print_success,
     print_warning,
     run_tool,
@@ -191,13 +193,23 @@ def _run_agent_until_handoff(
         thinking_summaries = client.extract_thinking_summaries(response)
         model_text = client.extract_response_text(response)
 
+        model_outputs: list[str] = []
         for summary in thinking_summaries:
             if summary.text:
-                print_role("model", format_thinking_summary(summary.text))
+                model_outputs.append(format_thinking_summary(summary.text))
         if model_text:
-            print_role("model", model_text)
+            model_outputs.append(model_text)
         for tool_call in function_calls:
-            print_role("model", format_tool_request(tool_call.name, tool_call.args))
+            model_outputs.append(format_tool_request(tool_call.name, tool_call.args))
+            if tool_call.name == return_to_user.__name__ and not model_text:
+                handoff_message = str(tool_call.args.get("message", "")).strip()
+                if handoff_message:
+                    model_outputs.append(handoff_message)
+
+        if len(model_outputs) > 1:
+            print_role_group("model", model_outputs)
+        elif model_outputs:
+            print_role("model", model_outputs[0])
 
         client.add_model_turn(
             text=model_text,
@@ -229,11 +241,7 @@ def _run_agent_until_handoff(
             args = tool_call.args
 
             if name == return_to_user.__name__:
-                message = str(args.get("message", "")).strip()
-                if message and message != model_text:
-                    print_role("model", message)
-                if not message and not model_text:
-                    print_role("model", "Returning control to user.")
+                print_user_input_boundary("handoff")
                 return [
                     DeferredToolResult(
                         name=name,
@@ -275,6 +283,7 @@ def _run_agent_until_handoff(
 
             if aborted_by_user:
                 print_role("user", format_control_note("Execution paused. Waiting for user instruction."))
+                print_user_input_boundary("tool-abort")
                 return [
                     DeferredToolResult(
                         name=name,

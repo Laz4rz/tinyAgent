@@ -124,6 +124,24 @@ def print_role(role: RoleName, text: str) -> None:
         print(f"  {line}")
 
 
+def print_role_group(role: RoleName, items: list[str]) -> None:
+    _clear_pending_model_waiting_line()
+    if not items:
+        return
+
+    print(f"{role_label(role)}")
+    for index, item in enumerate(items, start=1):
+        lines = item.splitlines() or [""]
+        print(f"  {index}. {_render_semantic_prefix(lines[0])}")
+        for line in lines[1:]:
+            print(f"     {line}")
+
+
+def print_user_input_boundary(reason: str) -> None:
+    _clear_pending_model_waiting_line()
+    print(f"\n{_style('─' * 56, STYLE_SECTION)}")
+
+
 def emit_message(target: TextSink, *, role: RoleName, text: str) -> None:
     print_role(role, text)
     target.add_text(text, role=role)

@@ -103,10 +103,13 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("main_tool_approval_abort", test_main_tool_approval_abort),
         ("main_api_error_handling", test_main_api_error_handling),
         ("main_tool_request_history", test_main_tool_request_history),
+        ("main_model_multi_output_grouped", test_main_model_multi_output_grouped),
         ("main_tool_request_history_openai_shape", test_main_tool_request_history_openai_shape),
         ("main_deferred_tool_result_return_to_user", test_main_deferred_tool_result_return_to_user),
         ("main_deferred_tool_result_abort", test_main_deferred_tool_result_abort),
         ("utils_emit_message", test_utils_emit_message),
+        ("utils_print_role_group", test_utils_print_role_group),
+        ("utils_user_input_boundary", test_utils_user_input_boundary),
         ("model_client_debug_recording", test_model_client_debug_recording),
         ("model_client_openai_request_config_stateless", test_model_client_openai_request_config_stateless),
         ("model_client_openai_history_encoding_structured", test_model_client_openai_history_encoding_structured),
@@ -580,6 +583,65 @@ def test_utils_emit_message() -> None:
     assert client.history[-1].parts[0].text == "[protocol] test-message"
 
 
+def test_utils_print_role_group() -> None:
+    import io
+    from contextlib import redirect_stdout
+
+    from utils import init_output_style, print_role_group
+
+    init_output_style()
+    out = io.StringIO()
+
+    with redirect_stdout(out):
+        print_role_group(
+            "model",
+            [
+                "thinking: planned next action",
+                'tool request: click {"x": 0.2, "y": 0.8}',
+                "final plain text",
+            ],
+        )
+
+    rendered = _strip_ansi(out.getvalue())
+    _print_block(
+        "utils.print_role_group",
+        {
+            "printed": rendered.strip(),
+        },
+    )
+
+    assert "agent" in rendered
+    assert "[" not in rendered and "]" not in rendered
+    assert "1. THINKING: planned next action" in rendered
+    assert '2. TOOL REQUEST: click {"x": 0.2, "y": 0.8}' in rendered
+    assert "3. final plain text" in rendered
+    assert "────────" not in rendered
+
+
+def test_utils_user_input_boundary() -> None:
+    import io
+    from contextlib import redirect_stdout
+
+    from utils import init_output_style, print_user_input_boundary
+
+    init_output_style()
+    out = io.StringIO()
+
+    with redirect_stdout(out):
+        print_user_input_boundary("handoff")
+
+    rendered = _strip_ansi(out.getvalue())
+    _print_block(
+        "utils.user_input_boundary",
+        {
+            "printed": rendered.strip(),
+        },
+    )
+
+    assert "────────" in rendered
+    assert "awaiting user input" not in rendered
+
+
 def test_model_client_openai_history_encoding_structured() -> None:
     from model_client import ConversationHistory, OpenAIClient, ThinkingSummary, ToolCall
 
@@ -907,6 +969,9 @@ def test_model_client_debug_recording() -> None:
 
 
 def test_main_tool_request_history() -> None:
+    import io
+    from contextlib import redirect_stdout
+
     from main import _run_agent_until_handoff
     from tools import return_to_user
 
@@ -961,11 +1026,15 @@ def test_main_tool_request_history() -> None:
             )
 
     fake_client = _FakeClient()
-    deferred = _run_agent_until_handoff(
-        fake_client,  # type: ignore[arg-type]
-        [return_to_user],
-        auto_approve_tools=False,
-    )
+    out = io.StringIO()
+    with redirect_stdout(out):
+        deferred = _run_agent_until_handoff(
+            fake_client,  # type: ignore[arg-type]
+            [return_to_user],
+            auto_approve_tools=False,
+        )
+
+    rendered = _strip_ansi(out.getvalue())
 
     serialized_history = [
         {
@@ -981,6 +1050,7 @@ def test_main_tool_request_history() -> None:
         "main.tool_request_history",
         {
             "history": serialized_history,
+            "printed": rendered.strip(),
         },
     )
     assert len(fake_client.history) == 1
@@ -990,10 +1060,85 @@ def test_main_tool_request_history() -> None:
     assert len(fake_client.history[0]["tool_calls"]) == 1
     assert fake_client.history[0]["tool_calls"][0].name == "return_to_user"
     assert fake_client.history[0]["tool_calls"][0].args == {"message": "Done."}
+    assert "agent" in rendered
+    assert "TOOL REQUEST: return_to_user" in rendered
+    assert "────────" in rendered
+    assert "awaiting user input" not in rendered
     assert len(deferred) == 1
     assert deferred[0].name == "return_to_user"
     assert deferred[0].call_id is None
     assert deferred[0].use_next_user_message_as_result is True
+
+
+def test_main_model_multi_output_grouped() -> None:
+    import io
+    from contextlib import redirect_stdout
+
+    from main import _run_agent_until_handoff
+    from model_client import ThinkingSummary
+    from tools import return_to_user
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.history: list[dict[str, Any]] = []
+
+        def tool_call_request_config(self, *, allowed_function_names: list[str]) -> dict[str, Any]:
+            _ = allowed_function_names
+            return {}
+
+        def generate(self, **kwargs: Any) -> object:
+            _ = kwargs
+            return object()
+
+        def extract_response_text(self, response: object) -> str:
+            _ = response
+            return "done"
+
+        def extract_thinking_summaries(self, response: object) -> list[ThinkingSummary]:
+            _ = response
+            return [ThinkingSummary(text="plan the action")]
+
+        def extract_tool_calls(self, response: object) -> list[ToolCall]:
+            _ = response
+            return [ToolCall(name="return_to_user", args={"message": "Done."})]
+
+        def add_model_turn(
+            self,
+            *,
+            text: str,
+            thinking_summaries: list[Any],
+            tool_calls: list[ToolCall],
+        ) -> None:
+            self.history.append(
+                {
+                    "kind": "model_turn",
+                    "text": text,
+                    "thinking_summaries": thinking_summaries,
+                    "tool_calls": tool_calls,
+                }
+            )
+
+    fake_client = _FakeClient()
+    out = io.StringIO()
+    with redirect_stdout(out):
+        _run_agent_until_handoff(
+            fake_client,  # type: ignore[arg-type]
+            [return_to_user],
+            auto_approve_tools=False,
+        )
+
+    rendered = _strip_ansi(out.getvalue())
+    _print_block(
+        "main.model_multi_output_grouped",
+        {
+            "printed": rendered.strip(),
+        },
+    )
+
+    assert "agent" in rendered
+    assert "1. THINKING: plan the action" in rendered
+    assert "2. done" in rendered
+    assert "3. TOOL REQUEST: return_to_user" in rendered
 
 
 def test_main_tool_request_history_openai_shape() -> None:
@@ -1225,6 +1370,9 @@ def test_main_deferred_tool_result_return_to_user() -> None:
 
 
 def test_main_deferred_tool_result_abort() -> None:
+    import io
+    from contextlib import redirect_stdout
+
     from main import _apply_deferred_tool_results, _run_agent_until_handoff
     from tools import click, return_to_user
 
@@ -1294,14 +1442,17 @@ def test_main_deferred_tool_result_abort() -> None:
     main_module.ask_tool_approval = lambda _prompt, default="deny": "abort"
     try:
         fake_client = _FakeClient()
-        deferred = _run_agent_until_handoff(
-            fake_client,  # type: ignore[arg-type]
-            [click, return_to_user],
-            auto_approve_tools=False,
-        )
+        out = io.StringIO()
+        with redirect_stdout(out):
+            deferred = _run_agent_until_handoff(
+                fake_client,  # type: ignore[arg-type]
+                [click, return_to_user],
+                auto_approve_tools=False,
+            )
     finally:
         main_module.ask_tool_approval = original_ask_tool_approval
 
+    rendered = _strip_ansi(out.getvalue())
     assert fake_client.tool_results == []
 
     consumed = _apply_deferred_tool_results(
@@ -1323,6 +1474,7 @@ def test_main_deferred_tool_result_abort() -> None:
                 for item in deferred
             ],
             "tool_results": fake_client.tool_results,
+            "printed": rendered.strip(),
         },
     )
 
@@ -1331,6 +1483,8 @@ def test_main_deferred_tool_result_abort() -> None:
     assert deferred[0].call_id == "call_abort"
     assert deferred[0].use_next_user_message_as_result is False
     assert "User denied tool `click` and aborted this run" in deferred[0].result_text
+    assert "────────" in rendered
+    assert "awaiting user input" not in rendered
     assert consumed is False
     assert fake_client.tool_results == [
         {

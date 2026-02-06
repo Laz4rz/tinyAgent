@@ -118,6 +118,8 @@ For interactive computer-use sessions:
 26. For Gemini tool loops, preserve `thought_signature` across history replay, including signatures attached to `function_call` parts and signature-only thought parts, to stay aligned with Gemini function-calling protocol guidance.
 27. Keep a dedicated runtime command to update and persist tool approval strategy (`ask`/`auto`) without full reconfiguration.
 28. Keep the agent system prompt in a user-editable root file and expose a runtime command to print the loaded prompt with clear restart guidance.
+29. When a single role turn has multiple outputs (for example thinking + text + multiple tool requests), render them as one grouped role block with numbered items for scanability.
+30. Use separator-only boundaries (no extra status text) when control flow needs fresh user text input (for example handoff via `return_to_user` or tool-abort pauses).
 
 ## Testing Philosophy
 1. Keep fast local tests for core logic (history, preprocessing, schema behavior).
