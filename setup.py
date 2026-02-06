@@ -14,6 +14,7 @@ from tool_schema import make_tool_schema
 ToolFn = Callable[..., Any]
 ToolStrategy = str
 CONFIG_PATH = Path(".tinyagent.config.json")
+SYSTEM_PROMPT_PATH = Path("agent_system_prompt.txt")
 VALID_TOOL_STRATEGIES = {"ask", "auto"}
 
 
@@ -33,6 +34,18 @@ class SessionConfig:
 
 def config_path(config_name: Path = CONFIG_PATH) -> Path:
     return Path.cwd() / config_name
+
+
+def load_system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:
+    try:
+        prompt = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError(f"Could not read system prompt file `{path}`: {exc}") from exc
+
+    if not prompt:
+        raise ValueError(f"System prompt file `{path}` is empty.")
+
+    return prompt
 
 
 def _session_config_from_dict(

@@ -170,6 +170,7 @@ def user_prompt() -> str:
 def print_session_help() -> None:
     print_info("\nSession commands:")
     print_info("  /help    Show commands")
+    print_info("  /prompt  Show loaded system prompt")
     print_info("  /status  Show current configuration")
     print_info("  /strategy [ask|auto]  Change tool approval strategy")
     print_info("  /reconfigure  Re-run setup and save config")

@@ -97,6 +97,7 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("main_cli_args_debug", test_main_cli_args_debug),
         ("main_provider_options", test_main_provider_options),
         ("main_reconfigure_command", test_main_reconfigure_command),
+        ("main_prompt_command", test_main_prompt_command),
         ("main_strategy_command", test_main_strategy_command),
         ("main_clean_command", test_main_clean_command),
         ("main_tool_approval_abort", test_main_tool_approval_abort),
@@ -115,6 +116,7 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("api_key_shared_secret", test_api_key_shared_secret),
         ("session_config_fixed_path", test_session_config_fixed_path),
         ("session_config_roundtrip", test_session_config_roundtrip),
+        ("session_load_system_prompt", test_session_load_system_prompt),
         ("session_parse_tool_strategy", test_session_parse_tool_strategy),
         ("known_models_constants", test_known_models_constants),
         ("main_tool_selection_parse", test_main_tool_selection_parse),
@@ -427,6 +429,34 @@ def test_session_config_fixed_path() -> None:
     assert resolved == Path.cwd() / CONFIG_PATH
 
 
+def test_session_load_system_prompt() -> None:
+    from setup import load_system_prompt
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        prompt_path = Path(tmp_dir) / "agent_system_prompt.txt"
+        prompt_path.write_text("line 1\nline 2\n", encoding="utf-8")
+
+        loaded = load_system_prompt(prompt_path)
+        _print_block(
+            "session.load_system_prompt",
+            {
+                "path": str(prompt_path),
+                "loaded": loaded,
+            },
+        )
+        assert loaded == "line 1\nline 2"
+
+        prompt_path.write_text("\n \n", encoding="utf-8")
+        try:
+            load_system_prompt(prompt_path)
+        except ValueError as exc:
+            error_message = str(exc)
+        else:
+            raise AssertionError("Empty system prompt should raise ValueError.")
+
+        assert "empty" in error_message.lower()
+
+
 def test_session_parse_tool_strategy() -> None:
     from setup import parse_tool_strategy
 
@@ -459,6 +489,13 @@ def test_main_reconfigure_command() -> None:
 
     _print_block("main.reconfigure_command", {"commands": sorted(RECONFIGURE_COMMANDS)})
     assert "/reconfigure" in RECONFIGURE_COMMANDS
+
+
+def test_main_prompt_command() -> None:
+    from main import PROMPT_COMMANDS
+
+    _print_block("main.prompt_command", {"commands": sorted(PROMPT_COMMANDS)})
+    assert "/prompt" in PROMPT_COMMANDS
 
 
 def test_main_strategy_command() -> None:

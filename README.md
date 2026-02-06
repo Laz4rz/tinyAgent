@@ -40,12 +40,18 @@ Notes:
 
 Session commands:
 - `/help`
+- `/prompt`
 - `/reconfigure`
 - `/status`
 - `/tools`
 - `/history`
 - `/clean`
 - `/exit`
+
+System prompt:
+1. Loaded from `agent_system_prompt.txt` at startup.
+2. Use `/prompt` to view the currently loaded prompt.
+3. Edit the file and restart `main.py` to apply changes.
 
 Debug artifacts:
 1. Stored under `debug/run-<timestamp>/`.

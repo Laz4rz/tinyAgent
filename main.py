@@ -9,10 +9,12 @@ from debug_recorder import DebugRecorder
 from model_client import BaseModelClient, build_model_client
 from setup import (
     CONFIG_PATH,
+    SYSTEM_PROMPT_PATH,
     ProviderOption,
     SessionConfig,
     config_path,
     ensure_session_config,
+    load_system_prompt,
     parse_tool_strategy,
     parse_tool_selection,
     prompt_tool_strategy,
@@ -46,20 +48,13 @@ from utils import (
 
 ToolFn = Callable[..., Any]
 
-AGENT_SYSTEM_PROMPT = (
-    "You are a computer-use agent.\n"
-    "You must use available tools for actions.\n"
-    "After each tool result, continue working until done.\n"
-    "When you finish, need clarification, or cannot proceed, call return_to_user(message=...).\n"
-    "Do not stop by plain text alone: use return_to_user to hand control back."
-)
-
 EXIT_COMMANDS = {"/exit"}
 HELP_COMMANDS = {"/help"}
 HISTORY_COMMANDS = {"/history"}
 RECONFIGURE_COMMANDS = {"/reconfigure"}
 CLEAN_COMMANDS = {"/clean"}
 STRATEGY_COMMANDS = {"/strategy"}
+PROMPT_COMMANDS = {"/prompt"}
 SHARED_SECRET_PATH = ".secret"
 API_ENV_BY_PROVIDER = {
     "google": "GEMINI_API_KEY",
@@ -106,7 +101,12 @@ def _select_tools(raw: str) -> list[ToolFn]:
     )
 
 
-def _build_runtime_session(api_key: str, config: SessionConfig) -> RuntimeSession:
+def _build_runtime_session(
+    api_key: str,
+    config: SessionConfig,
+    *,
+    system_prompt: str,
+) -> RuntimeSession:
     print_info(f"Initializing model client ({config.provider}/{config.model})...")
     provider = _provider_option(config.provider)
     selected_tools = _select_tools(",".join(config.tools))
@@ -116,7 +116,7 @@ def _build_runtime_session(api_key: str, config: SessionConfig) -> RuntimeSessio
         provider=config.provider,
         api_key=api_key,
         model=config.model,
-        system_prompt=AGENT_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
     )
     client.set_tool_functions(agent_tools)
 
@@ -317,6 +317,8 @@ def main() -> None:
         print_info(f"Debug mode enabled. Writing artifacts to: {debug_recorder.run_dir}")
 
     config_file = config_path(CONFIG_PATH)
+    system_prompt_file = config_path(SYSTEM_PROMPT_PATH)
+    agent_system_prompt = load_system_prompt(system_prompt_file)
     resolved_config = ensure_session_config(
         config_file=config_file,
         providers=PROVIDERS,
@@ -327,7 +329,11 @@ def main() -> None:
     session_config = resolved_config
 
     api_key = _load_provider_api_key(session_config.provider)
-    runtime = _build_runtime_session(api_key, session_config)
+    runtime = _build_runtime_session(
+        api_key,
+        session_config,
+        system_prompt=agent_system_prompt,
+    )
     deferred_tool_results: list[DeferredToolResult] = []
 
     print_section("Session Ready")
@@ -358,7 +364,11 @@ def main() -> None:
                 )
                 runtime.client.close()
                 api_key = _load_provider_api_key(new_config.provider)
-                runtime = _build_runtime_session(api_key, new_config)
+                runtime = _build_runtime_session(
+                    api_key,
+                    new_config,
+                    system_prompt=agent_system_prompt,
+                )
                 session_config = new_config
                 deferred_tool_results = []
                 print_section("Session Reconfigured")
@@ -398,6 +408,13 @@ def main() -> None:
                 save_session_config(config_file, session_config)
                 runtime.auto_approve_tools = new_strategy == "auto"
                 print_success(f"Tool strategy set to `{new_strategy}` and saved.")
+                continue
+            if user_input in PROMPT_COMMANDS:
+                print_section("System Prompt")
+                print_role("model", agent_system_prompt)
+                print_info(
+                    f"Edit `{system_prompt_file}` to change it. Restart `main.py` to load updates."
+                )
                 continue
             if user_input == "/status":
                 print_session_status(
