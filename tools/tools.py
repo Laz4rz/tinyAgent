@@ -1,7 +1,13 @@
 import time
 import sys
 
-from .helpers import modifier_keys, normalized_to_pixels, release_keys, resolve_combo_key
+from .helpers import (
+    modifier_keys,
+    normalized_to_pixels,
+    release_keys,
+    resolve_combo_key,
+    unsupported_combo_keys,
+)
 
 
 def move_mouse(x: float, y: float) -> str:
@@ -39,6 +45,25 @@ def click(x: float, y: float, button: str = "left") -> str:
         return f"Failed to click {button} at ({x}, {y}): {exc}"
 
 
+def type(text: str, interval_ms: int = 0) -> str:
+    """Type text into the currently focused input.
+
+    Args:
+        text: Text to type.
+        interval_ms: Delay between keystrokes in milliseconds.
+    """
+    try:
+        import pyautogui
+
+        if interval_ms < 0:
+            raise ValueError("interval_ms must be >= 0")
+
+        pyautogui.write(text, interval=interval_ms / 1000)
+        return f"Successfully sent typed text ({len(text)} chars)"
+    except Exception as exc:
+        return f"Failed to type text: {exc}"
+
+
 def press_combo(*keys: str, hold_ms: int = 0) -> str:
     """Press a chord of keys, optionally hold, then release in reverse order.
 
@@ -51,18 +76,23 @@ def press_combo(*keys: str, hold_ms: int = 0) -> str:
     Example:
         press_combo("ctrl", "a", hold_ms=50)
     """
+    combo = ", ".join(keys)
     try:
         import pyautogui
     except Exception as exc:
-        return f"Failed to press combo {', '.join(keys)}: {exc}"
+        return f"Failed to send combo {combo}: {exc}"
 
     pressed: list[str] = []
     error_message: str | None = None
     try:
-        for key in keys:
-            lowered = resolve_combo_key(key, platform_name=sys.platform)
-            pyautogui.keyDown(lowered)
-            pressed.append(lowered)
+        resolved_keys = [resolve_combo_key(key, platform_name=sys.platform) for key in keys]
+        unsupported_keys = unsupported_combo_keys(pyautogui, resolved_keys)
+        if unsupported_keys:
+            raise ValueError(f"unsupported key(s): {', '.join(unsupported_keys)}")
+
+        for resolved_key in resolved_keys:
+            pyautogui.keyDown(resolved_key)
+            pressed.append(resolved_key)
         if hold_ms:
             time.sleep(hold_ms / 1000)
     except Exception as exc:
@@ -71,19 +101,18 @@ def press_combo(*keys: str, hold_ms: int = 0) -> str:
         release_targets = list(dict.fromkeys([*reversed(pressed), *modifier_keys()]))
         release_errors = release_keys(pyautogui, release_targets)
 
-    combo = ", ".join(keys)
     if error_message:
         if release_errors:
             return (
-                f"Failed to press combo {combo}: {error_message}. "
+                f"Failed to send combo {combo}: {error_message}. "
                 f"Key release errors: {'; '.join(release_errors)}"
             )
-        return f"Failed to press combo {combo}: {error_message}"
+        return f"Failed to send combo {combo}: {error_message}"
 
     if release_errors:
         return f"Failed to fully release combo {combo}: {'; '.join(release_errors)}"
 
-    return f"Successfully pressed combo: {combo}"
+    return f"Successfully sent combo: {combo}"
 
 
 def return_to_user(message: str) -> str:

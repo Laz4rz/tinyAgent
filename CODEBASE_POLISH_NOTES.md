@@ -84,6 +84,8 @@ Current preference:
 5. Use one coordinate convention across pointer tools; currently both `move_mouse` and `click` use normalized `x, y` in `[0, 1]`.
 6. Keep an explicit `return_to_user` handoff tool so autonomous loops have a clear, inspectable stop condition.
 7. Any keyboard tool that calls key-down events must guarantee key-up cleanup inside the same tool call, including failure/retry paths.
+8. For low-level input tools (for example keyboard/mouse dispatch), success text should describe dispatched input, not guarantee the external app/OS effect happened.
+9. Keep a dedicated text-entry tool (`type`) distinct from shortcut/chord tools (`press_combo`) so model intent stays explicit.
 
 ### Runtime Loop
 For interactive computer-use sessions:

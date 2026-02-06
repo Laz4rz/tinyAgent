@@ -122,10 +122,12 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("history_model_turn_preserves_tool_call_signature", test_history_model_turn_preserves_tool_call_signature),
         ("history_visualization_text_and_image", test_history_visualization_text_and_image),
         ("return_to_user_tool", test_return_to_user_tool),
+        ("type_tool", test_type_tool),
         ("image_auto_downsize_default", test_image_auto_downsize_default),
         ("image_preprocess_settings", test_image_preprocess_settings),
         ("press_combo_releases_on_failsafe", test_press_combo_releases_on_failsafe),
         ("press_combo_stuck_key_recovery", test_press_combo_stuck_key_recovery),
+        ("press_combo_invalid_key", test_press_combo_invalid_key),
         ("tools_gui", test_tools_gui),
         ("tool_schemas", test_tool_schemas),
         ("gemini_init", test_init),
@@ -164,11 +166,12 @@ def _select_tests(
 
 
 def _default_tools() -> list[dict]:
-    from tools import click, move_mouse, press_combo, return_to_user
+    from tools import click, move_mouse, press_combo, return_to_user, type as type_tool
 
     return [
         make_tool_schema(move_mouse),
         make_tool_schema(click),
+        make_tool_schema(type_tool),
         make_tool_schema(press_combo),
         make_tool_schema(return_to_user),
     ]
@@ -204,6 +207,17 @@ def _gemini_tools() -> list[object]:
                             "button": types.Schema(type="string"),
                         },
                         ["x", "y"],
+                    ),
+                ),
+                types.FunctionDeclaration(
+                    name="type",
+                    description="Type text into the currently focused input.",
+                    parameters=obj(
+                        {
+                            "text": types.Schema(type="string"),
+                            "interval_ms": types.Schema(type="integer"),
+                        },
+                        ["text"],
                     ),
                 ),
                 types.FunctionDeclaration(
@@ -366,7 +380,7 @@ def test_api_key_shared_secret() -> None:
 
 def test_session_config_roundtrip() -> None:
     from setup import ProviderOption, SessionConfig, load_session_config, save_session_config
-    from tools import click, move_mouse, press_combo
+    from tools import click, move_mouse, press_combo, type as type_tool
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         config_path = Path(tmp_dir) / ".tinyagent.config.json"
@@ -377,7 +391,7 @@ def test_session_config_roundtrip() -> None:
             tool_strategy="ask",
         )
         providers = [ProviderOption(key="google", label="Google Gemini")]
-        available_tools = [move_mouse, click, press_combo]
+        available_tools = [move_mouse, click, type_tool, press_combo]
         tool_registry = {fn.__name__: fn for fn in available_tools}
 
         save_session_config(config_path, config)
@@ -1328,9 +1342,9 @@ def test_main_api_error_handling() -> None:
 
 def test_main_tool_selection_parse() -> None:
     from setup import parse_tool_selection
-    from tools import click, move_mouse, press_combo
+    from tools import click, move_mouse, press_combo, type as type_tool
 
-    available_tools = [move_mouse, click, press_combo]
+    available_tools = [move_mouse, click, type_tool, press_combo]
     tool_registry = {fn.__name__: fn for fn in available_tools}
     selected = parse_tool_selection(
         "1,click",
@@ -1385,6 +1399,39 @@ def test_return_to_user_tool() -> None:
     result = return_to_user("Need your confirmation.")
     _print_block("tool.return_to_user", {"result": result})
     assert result == "Need your confirmation."
+
+
+def test_type_tool() -> None:
+    from tools.tools import type as type_tool
+
+    fake = types.ModuleType("pyautogui")
+    write_calls: list[dict[str, Any]] = []
+
+    def _write(text: str, *, interval: float = 0) -> None:
+        write_calls.append({"text": text, "interval": interval})
+
+    fake.write = _write
+
+    original = sys.modules.get("pyautogui")
+    sys.modules["pyautogui"] = fake
+    try:
+        result = type_tool("abc", interval_ms=120)
+    finally:
+        if original is None:
+            del sys.modules["pyautogui"]
+        else:
+            sys.modules["pyautogui"] = original
+
+    _print_block(
+        "tool.type",
+        {
+            "result": result,
+            "write_calls": write_calls,
+        },
+    )
+
+    assert result == "Successfully sent typed text (3 chars)"
+    assert write_calls == [{"text": "abc", "interval": 0.12}]
 
 
 def test_image_preprocess_settings() -> None:
@@ -1478,6 +1525,7 @@ def test_press_combo_releases_on_failsafe() -> None:
     fake = types.ModuleType("pyautogui")
     held: list[str] = []
     fake.FAILSAFE = True
+    fake.KEYBOARD_KEYS = ("shift", "a", "ctrl", "alt", "command", "option", "win")
 
     def _key_down(key: str) -> None:
         held.append(key)
@@ -1510,7 +1558,7 @@ def test_press_combo_releases_on_failsafe() -> None:
         },
     )
 
-    assert result.startswith("Successfully pressed combo:")
+    assert result.startswith("Successfully sent combo:")
     assert held == []
     assert fake.FAILSAFE is True
 
@@ -1522,6 +1570,7 @@ def test_press_combo_stuck_key_recovery() -> None:
     held: list[str] = []
     key_up_calls: dict[str, int] = {}
     fake.FAILSAFE = True
+    fake.KEYBOARD_KEYS = ("shift", "ctrl", "alt", "command", "option", "win")
 
     def _key_down(key: str) -> None:
         held.append(key)
@@ -1555,9 +1604,53 @@ def test_press_combo_stuck_key_recovery() -> None:
         },
     )
 
-    assert result.startswith("Successfully pressed combo:")
+    assert result.startswith("Successfully sent combo:")
     assert held == []
     assert key_up_calls.get("shift", 0) >= 2
+
+
+def test_press_combo_invalid_key() -> None:
+    from tools.tools import press_combo
+
+    fake = types.ModuleType("pyautogui")
+    held: list[str] = []
+    key_down_calls: list[str] = []
+    fake.FAILSAFE = True
+    fake.KEYBOARD_KEYS = ("a", "shift", "ctrl", "alt", "command", "option", "win")
+
+    def _key_down(key: str) -> None:
+        key_down_calls.append(key)
+        held.append(key)
+
+    def _key_up(key: str) -> None:
+        if key in held:
+            held.remove(key)
+
+    fake.keyDown = _key_down
+    fake.keyUp = _key_up
+
+    original = sys.modules.get("pyautogui")
+    sys.modules["pyautogui"] = fake
+    try:
+        result = press_combo("not_a_real_key", "a")
+    finally:
+        if original is None:
+            del sys.modules["pyautogui"]
+        else:
+            sys.modules["pyautogui"] = original
+
+    _print_block(
+        "press_combo.invalid_key",
+        {
+            "result": result,
+            "key_down_calls": key_down_calls,
+            "held_after": held,
+        },
+    )
+
+    assert result == "Failed to send combo not_a_real_key, a: unsupported key(s): not_a_real_key"
+    assert key_down_calls == []
+    assert held == []
 
 
 def test_init() -> None:
@@ -1699,7 +1792,10 @@ def test_tools_gui() -> None:
 
 
 def test_tool_schemas() -> None:
-    _print_block("tool_schemas", _default_tools())
+    schemas = _default_tools()
+    _print_block("tool_schemas", schemas)
+    names = [schema["name"] for schema in schemas]
+    assert "type" in names
 
 
 def test_gemini_tool_click() -> None:

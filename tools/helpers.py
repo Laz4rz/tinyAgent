@@ -14,6 +14,16 @@ def resolve_combo_key(key: str, *, platform_name: str) -> str:
     return lowered
 
 
+def unsupported_combo_keys(pyautogui, keys: list[str]) -> list[str]:
+    try:
+        keyboard_keys = pyautogui.KEYBOARD_KEYS
+    except AttributeError:
+        return []
+
+    supported = {str(key).lower() for key in keyboard_keys}
+    return [key for key in keys if key not in supported]
+
+
 def modifier_keys() -> tuple[str, ...]:
     return ("shift", "ctrl", "alt", "command", "option", "win")
 

@@ -19,7 +19,7 @@ from setup import (
     reconfigure_session,
     save_session_config,
 )
-from tools import click, move_mouse, press_combo, return_to_user
+from tools import click, move_mouse, press_combo, return_to_user, type as type_text
 from utils import (
     ask_tool_approval,
     emit_message,
@@ -70,7 +70,7 @@ PROVIDERS = [
     ProviderOption(key="google", label="Google Gemini"),
     ProviderOption(key="openai", label="OpenAI"),
 ]
-AVAILABLE_TOOLS: list[ToolFn] = [move_mouse, click, press_combo]
+AVAILABLE_TOOLS: list[ToolFn] = [move_mouse, click, type_text, press_combo]
 TOOL_REGISTRY: dict[str, ToolFn] = {fn.__name__: fn for fn in AVAILABLE_TOOLS}
 
 
