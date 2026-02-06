@@ -1,11 +1,15 @@
+import argparse
 import json
+import io
+import re
 import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 from api_key import load_api_key
-from model_client import GeminiClient
+from model_client import BaseModelClient, GeminiClient, ImageSettings
 from tool_schema import make_tool_schema
 
 
@@ -13,9 +17,30 @@ class SkipTest(Exception):
     pass
 
 
+class _StubClient(BaseModelClient):
+    def __init__(self) -> None:
+        super().__init__(model="stub-model")
+
+    def _build_request_config(self, config_kwargs: dict[str, Any]) -> Any:
+        return config_kwargs
+
+    def _encode_history(self) -> list:
+        return self.get_history()
+
+    def _call_model(self, *, encoded_history: list, request_config: Any) -> dict[str, str]:
+        return {"text": "stub-response"}
+
+    def _extract_text(self, response: dict[str, str]) -> str:
+        return response["text"]
+
+
 def _print_block(title: str, payload) -> None:
     print(f"[{title}]")
     print(json.dumps(payload, indent=2))
+
+
+def _strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
 def _wait_for(root, predicate, *, timeout_s: float = 2.0) -> None:
@@ -62,10 +87,70 @@ def _args_to_dict(args) -> dict:
         return {}
 
 
-def _default_tools() -> list[dict]:
-    from controls import click, move_mouse, press_combo
+def _all_tests() -> list[tuple[str, Any]]:
+    return [
+        ("main_reconfigure_command", test_main_reconfigure_command),
+        ("main_clean_command", test_main_clean_command),
+        ("main_tool_approval_abort", test_main_tool_approval_abort),
+        ("main_api_error_handling", test_main_api_error_handling),
+        ("main_tool_request_history", test_main_tool_request_history),
+        ("utils_emit_message", test_utils_emit_message),
+        ("session_config_fixed_path", test_session_config_fixed_path),
+        ("session_config_roundtrip", test_session_config_roundtrip),
+        ("known_models_constants", test_known_models_constants),
+        ("main_tool_selection_parse", test_main_tool_selection_parse),
+        ("main_extract_response_text", test_main_extract_response_text),
+        ("history_object", test_history_object),
+        ("history_visualization_text_and_image", test_history_visualization_text_and_image),
+        ("return_to_user_tool", test_return_to_user_tool),
+        ("image_auto_downsize_default", test_image_auto_downsize_default),
+        ("image_preprocess_settings", test_image_preprocess_settings),
+        ("tools_gui", test_tools_gui),
+        ("tool_schemas", test_tool_schemas),
+        ("gemini_init", test_init),
+        ("gemini_text_image", test_text_and_image),
+        ("gemini_tool_click", test_gemini_tool_click),
+    ]
 
-    return [make_tool_schema(move_mouse), make_tool_schema(click), make_tool_schema(press_combo)]
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="tinyAgent local test runner")
+    parser.add_argument(
+        "--test",
+        help="Run a single test by name. Accepts display name or function name.",
+    )
+    return parser.parse_args(argv)
+
+
+def _select_tests(
+    tests: list[tuple[str, Any]],
+    *,
+    requested_test: str | None,
+) -> list[tuple[str, Any]]:
+    if requested_test is None:
+        return tests
+
+    selected = [
+        (name, fn)
+        for name, fn in tests
+        if name == requested_test or fn.__name__ == requested_test
+    ]
+    if selected:
+        return selected
+
+    available = ", ".join(name for name, _ in tests)
+    raise ValueError(f"unknown test '{requested_test}'. Available tests: {available}")
+
+
+def _default_tools() -> list[dict]:
+    from tools import click, move_mouse, press_combo, return_to_user
+
+    return [
+        make_tool_schema(move_mouse),
+        make_tool_schema(click),
+        make_tool_schema(press_combo),
+        make_tool_schema(return_to_user),
+    ]
 
 
 def _gemini_tools() -> list[object]:
@@ -79,11 +164,11 @@ def _gemini_tools() -> list[object]:
             function_declarations=[
                 types.FunctionDeclaration(
                     name="move_mouse",
-                    description="Move mouse cursor to absolute screen coordinates.",
+                    description="Move mouse cursor to normalized screen coordinates.",
                     parameters=obj(
                         {
-                            "x": types.Schema(type="integer"),
-                            "y": types.Schema(type="integer"),
+                            "x": types.Schema(type="number"),
+                            "y": types.Schema(type="number"),
                         },
                         ["x", "y"],
                     ),
@@ -119,7 +204,7 @@ def _gemini_tools() -> list[object]:
     ]
 
 
-def _maybe_client() -> GeminiClient | None:
+def _maybe_client() -> GeminiClient:
     api_key = load_api_key(prompt=False)
     if not api_key:
         raise SkipTest("set GEMINI_API_KEY or .secret to run model tests")
@@ -133,6 +218,424 @@ def _maybe_client() -> GeminiClient | None:
         return client
     except Exception as exc:
         raise RuntimeError(f"gemini init failed: {exc}") from exc
+
+
+def test_history_object() -> None:
+    client = _StubClient()
+    client.add_text("hello")
+    client.add_text("hi", role="model")
+
+    snapshot = client.get_history()
+    _print_block(
+        "history.object",
+        {
+            "history_len": len(client.history),
+            "roles": [message.role for message in client.history],
+            "first_text": client.history[0].parts[0].text,
+            "snapshot_len": len(snapshot),
+        },
+    )
+
+    assert len(client.history) == 2
+    assert client.history[0].parts[0].text == "hello"
+    assert snapshot[1].role == "model"
+
+
+def test_known_models_constants() -> None:
+    from models import DEFAULT_MODEL_BY_PROVIDER, KNOWN_MODEL_IDS_BY_PROVIDER, default_model, known_models
+
+    _print_block(
+        "models.constants",
+        {
+            "providers": sorted(KNOWN_MODEL_IDS_BY_PROVIDER.keys()),
+            "default_google": default_model("google"),
+        },
+    )
+
+    google_known = known_models("google")
+    assert len(google_known) >= 1
+    assert len(set(google_known)) == len(google_known)
+    assert default_model("google") in google_known
+    assert DEFAULT_MODEL_BY_PROVIDER["google"] == default_model("google")
+
+
+def test_session_config_roundtrip() -> None:
+    from setup import ProviderOption, SessionConfig, load_session_config, save_session_config
+    from tools import click, move_mouse, press_combo
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        config_path = Path(tmp_dir) / ".tinyagent.config.json"
+        config = SessionConfig(
+            provider="google",
+            model="gemini-2.5-flash",
+            tools=["move_mouse", "click"],
+            tool_strategy="ask",
+        )
+        providers = [ProviderOption(key="google", label="Google Gemini")]
+        available_tools = [move_mouse, click, press_combo]
+        tool_registry = {fn.__name__: fn for fn in available_tools}
+
+        save_session_config(config_path, config)
+        loaded = load_session_config(
+            config_path,
+            providers=providers,
+            tool_registry=tool_registry,
+        )
+
+        _print_block(
+            "session.config.roundtrip",
+            {
+                "path": str(config_path),
+                "loaded_provider": loaded.provider if loaded else None,
+                "loaded_model": loaded.model if loaded else None,
+            },
+        )
+
+        assert loaded == config
+
+
+def test_session_config_fixed_path() -> None:
+    from setup import CONFIG_PATH, config_path
+
+    resolved = config_path()
+    _print_block(
+        "session.config.path",
+        {
+            "resolved": str(resolved),
+            "expected_suffix": str(CONFIG_PATH),
+        },
+    )
+    assert resolved == Path.cwd() / CONFIG_PATH
+
+
+def test_main_reconfigure_command() -> None:
+    from main import RECONFIGURE_COMMANDS
+
+    _print_block("main.reconfigure_command", {"commands": sorted(RECONFIGURE_COMMANDS)})
+    assert "/reconfigure" in RECONFIGURE_COMMANDS
+
+
+def test_main_clean_command() -> None:
+    from main import CLEAN_COMMANDS
+
+    _print_block("main.clean_command", {"commands": sorted(CLEAN_COMMANDS)})
+    assert "/clean" in CLEAN_COMMANDS
+
+
+def test_main_tool_approval_abort() -> None:
+    import builtins
+
+    from utils import ask_tool_approval
+
+    original_input = builtins.input
+    scripted_inputs = iter(["a", "", "y"])
+    builtins.input = lambda _prompt="": next(scripted_inputs)
+
+    try:
+        abort_choice = ask_tool_approval("Run tool?", default="deny")
+        default_choice = ask_tool_approval("Run tool?", default="deny")
+        approve_choice = ask_tool_approval("Run tool?", default="deny")
+    finally:
+        builtins.input = original_input
+
+    _print_block(
+        "main.tool_approval_abort",
+        {
+            "abort_choice": abort_choice,
+            "default_choice": default_choice,
+            "approve_choice": approve_choice,
+        },
+    )
+    assert abort_choice == "abort"
+    assert default_choice == "deny"
+    assert approve_choice == "approve"
+
+
+def test_utils_emit_message() -> None:
+    import io
+    from contextlib import redirect_stdout
+
+    from utils import emit_message, init_output_style
+
+    init_output_style()
+    client = _StubClient()
+    out = io.StringIO()
+
+    with redirect_stdout(out):
+        emit_message(client, role="user", text="[protocol] test-message")
+
+    rendered = _strip_ansi(out.getvalue())
+    _print_block(
+        "utils.emit_message",
+        {
+            "printed": rendered.strip(),
+            "history_role": client.history[-1].role,
+            "history_text": client.history[-1].parts[0].text,
+        },
+    )
+
+    assert "user>" in rendered
+    assert "[protocol] test-message" in rendered
+    assert client.history[-1].role == "user"
+    assert client.history[-1].parts[0].text == "[protocol] test-message"
+
+
+def test_main_tool_request_history() -> None:
+    try:
+        from google.genai import types as _types  # noqa: F401
+    except ModuleNotFoundError as exc:
+        raise SkipTest("google-genai is required for loop tests") from exc
+
+    from main import _run_agent_until_handoff
+    from tools import return_to_user
+
+    class _FakeCall:
+        def __init__(self, name: str, args: dict[str, Any]) -> None:
+            self.name = name
+            self.args = args
+
+    class _FakeResponse:
+        def __init__(self, calls: list[object]) -> None:
+            self.function_calls = calls
+            self.candidates = []
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.history: list[tuple[str, str]] = []
+
+        def generate(self, **kwargs: Any) -> _FakeResponse:
+            return _FakeResponse([_FakeCall("return_to_user", {"message": "Done."})])
+
+        def add_text(self, text: str, *, role: str = "user") -> None:
+            self.history.append((role, text))
+
+    fake_client = _FakeClient()
+    _run_agent_until_handoff(
+        fake_client,  # type: ignore[arg-type]
+        [return_to_user],
+        auto_approve_tools=False,
+    )
+
+    _print_block(
+        "main.tool_request_history",
+        {
+            "history": fake_client.history,
+        },
+    )
+    assert len(fake_client.history) == 2
+    assert fake_client.history[0][0] == "model"
+    assert fake_client.history[0][1].startswith("[tool-request] return_to_user")
+    assert fake_client.history[1] == ("model", "Done.")
+
+
+def test_main_api_error_handling() -> None:
+    import io
+    from contextlib import redirect_stdout
+
+    try:
+        from google.genai import types as _types  # noqa: F401
+    except ModuleNotFoundError as exc:
+        raise SkipTest("google-genai is required for loop tests") from exc
+
+    from main import _run_agent_until_handoff
+    from tools import return_to_user
+
+    class _ErrorClient:
+        def generate(self, **kwargs: Any):  # noqa: ANN003
+            raise RuntimeError("simulated API failure")
+
+        def add_text(self, text: str, *, role: str = "user") -> None:
+            raise AssertionError("add_text should not be called when generate fails")
+
+    out = io.StringIO()
+    with redirect_stdout(out):
+        _run_agent_until_handoff(
+            _ErrorClient(),  # type: ignore[arg-type]
+            [return_to_user],
+            auto_approve_tools=False,
+        )
+
+    rendered = _strip_ansi(out.getvalue())
+    _print_block("main.api_error_handling", {"printed": rendered.strip()})
+    assert "[error] simulated API failure" in rendered
+
+
+def test_main_tool_selection_parse() -> None:
+    from setup import parse_tool_selection
+    from tools import click, move_mouse, press_combo
+
+    available_tools = [move_mouse, click, press_combo]
+    tool_registry = {fn.__name__: fn for fn in available_tools}
+    selected = parse_tool_selection(
+        "1,click",
+        available_tools=available_tools,
+        tool_registry=tool_registry,
+    )
+    selected_names = [fn.__name__ for fn in selected]
+    _print_block("main.tool_selection_parse", {"selected": selected_names})
+    assert selected_names == ["move_mouse", "click"]
+
+
+def test_main_extract_response_text() -> None:
+    from utils import extract_response_text
+
+    class _Part:
+        def __init__(self, *, text=None, function_call=None):
+            self.text = text
+            self.function_call = function_call
+
+    class _Content:
+        def __init__(self, parts):
+            self.parts = parts
+
+    class _Candidate:
+        def __init__(self, content):
+            self.content = content
+
+    class _Response:
+        def __init__(self, candidates):
+            self.candidates = candidates
+
+    response = _Response(
+        candidates=[
+            _Candidate(_Content(parts=[_Part(text="first"), _Part(function_call=object())])),
+            _Candidate(_Content(parts=[_Part(text="second")])),
+        ]
+    )
+
+    text = extract_response_text(response)
+    _print_block("main.extract_response_text", {"text": text})
+    assert text == "first\nsecond"
+
+
+def test_history_visualization_text_and_image() -> None:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise SkipTest("Pillow is required for image preprocessing tests") from exc
+
+    client = _StubClient()
+    image_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            image_path = Path(tmp.name)
+
+        Image.new("RGB", (320, 200), (80, 140, 200)).save(image_path)
+
+        client.add_text("Hello from user", role="user")
+        client.add_image(image_path, role="user")
+
+        rendered_colored = client.format_history()
+        rendered = _strip_ansi(rendered_colored)
+
+        print("[history.visualized]")
+        print(rendered_colored)
+
+        assert "\x1b[" in rendered_colored
+        assert "1. role: user" in rendered
+        assert "2. role: user" in rendered
+        assert "input 1 (text)" in rendered
+        assert "content: Hello from user" in rendered
+        assert "input 1 (image)" in rendered
+        assert "type: image/png" in rendered
+        assert "compression: lossless" in rendered
+    finally:
+        if image_path is not None:
+            image_path.unlink(missing_ok=True)
+
+
+def test_return_to_user_tool() -> None:
+    from tools import return_to_user
+
+    result = return_to_user("Need your confirmation.")
+    _print_block("tool.return_to_user", {"result": result})
+    assert result == "Need your confirmation."
+
+
+def test_image_preprocess_settings() -> None:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise SkipTest("Pillow is required for image preprocessing tests") from exc
+
+    client = _StubClient()
+    image_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            image_path = Path(tmp.name)
+
+        base_image = Image.new("RGB", (1200, 800), (10, 90, 180))
+        base_image.save(image_path)
+
+        client.add_image(
+            image_path,
+            settings=ImageSettings(scale=0.25, format="jpeg", quality=70),
+        )
+
+        part = client.history[-1].parts[0]
+        with Image.open(io.BytesIO(part.data)) as processed:
+            width, height = processed.size
+            image_format = processed.format
+
+        _print_block(
+            "image.preprocess",
+            {
+                "mime_type": part.mime_type,
+                "size": [width, height],
+                "format": image_format,
+                "bytes": len(part.data),
+            },
+        )
+
+        assert (width, height) == (300, 200)
+        assert part.mime_type == "image/jpeg"
+        assert image_format == "JPEG"
+    finally:
+        if image_path is not None:
+            image_path.unlink(missing_ok=True)
+
+
+def test_image_auto_downsize_default() -> None:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise SkipTest("Pillow is required for image preprocessing tests") from exc
+
+    client = _StubClient()
+    image_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            image_path = Path(tmp.name)
+
+        base_image = Image.new("RGB", (640, 360), (220, 70, 40))
+        base_image.save(image_path)
+
+        client.add_image(image_path)
+
+        part = client.history[-1].parts[0]
+        with Image.open(io.BytesIO(part.data)) as processed:
+            width, height = processed.size
+            image_format = processed.format
+
+        _print_block(
+            "image.autodownsize",
+            {
+                "mime_type": part.mime_type,
+                "size": [width, height],
+                "format": image_format,
+                "bytes": len(part.data),
+            },
+        )
+
+        assert (width, height) == (160, 90)
+        assert part.mime_type == "image/png"
+        assert image_format == "PNG"
+    finally:
+        if image_path is not None:
+            image_path.unlink(missing_ok=True)
 
 
 def test_init() -> None:
@@ -168,6 +671,9 @@ def test_text_and_image() -> None:
             image_path = Path(tmp.name)
 
         client.add_image(image_path, role="user")
+        rendered_colored = client.format_history()
+        rendered = _strip_ansi(rendered_colored)
+
         _print_block(
             "gemini.text_image",
             {
@@ -175,8 +681,18 @@ def test_text_and_image() -> None:
                 "last_parts": [p.kind for p in client.history[-1].parts],
                 "image_bytes": image_path.stat().st_size,
                 "image_path": str(image_path),
+                "history_visualization": rendered,
             },
         )
+        print("[gemini.text_image.visualized]")
+        print(rendered_colored)
+        assert "1. role: user" in rendered
+        assert "2. role: user" in rendered
+        assert "input 1 (text)" in rendered
+        assert "content: Hello from user" in rendered
+        assert "input 1 (image)" in rendered
+        assert "type: image/png" in rendered
+        assert "compression: lossless" in rendered
     finally:
         if image_path is not None:
             try:
@@ -186,7 +702,7 @@ def test_text_and_image() -> None:
         client.close()
 
 
-def test_controls_gui() -> None:
+def test_tools_gui() -> None:
     try:
         import tkinter as tk
     except Exception as exc:  # pragma: no cover
@@ -194,7 +710,7 @@ def test_controls_gui() -> None:
 
     import pyautogui
 
-    from controls import click, move_mouse, press_combo
+    from tools import click, move_mouse, press_combo
 
     try:  # Fix coordinate mismatches on Windows with DPI scaling.
         import ctypes
@@ -235,10 +751,10 @@ def test_controls_gui() -> None:
 
         ex = entry.winfo_rootx() + entry.winfo_width() // 2
         ey = entry.winfo_rooty() + entry.winfo_height() // 2
-
-        move_mouse(ex, ey)
-        time.sleep(0.05)
         width, height = pyautogui.size()
+
+        move_mouse(ex / width, ey / height)
+        time.sleep(0.05)
         click(ex / width, ey / height, "left")
         _wait_for(root, lambda: root.focus_get() is entry)
 
@@ -249,7 +765,7 @@ def test_controls_gui() -> None:
 
         bx = ok_btn.winfo_rootx() + ok_btn.winfo_width() // 2
         by = ok_btn.winfo_rooty() + ok_btn.winfo_height() // 2
-        move_mouse(bx, by)
+        move_mouse(bx / width, by / height)
         time.sleep(0.05)
         click(bx / width, by / height, "left")
         _wait_for(root, lambda: ok_clicked)
@@ -277,7 +793,7 @@ def test_gemini_tool_click() -> None:
     except Exception:
         pass
 
-    from controls import click
+    from tools import click
 
     client = _maybe_client()
 
@@ -375,13 +891,13 @@ def test_gemini_tool_click() -> None:
         client.close()
 
 def main() -> None:
-    tests = [
-        ("controls_gui", test_controls_gui),
-        ("tool_schemas", test_tool_schemas),
-        ("gemini_init", test_init),
-        ("gemini_text_image", test_text_and_image),
-        ("gemini_tool_click", test_gemini_tool_click),
-    ]
+    tests = _all_tests()
+    args = _parse_args(sys.argv[1:])
+    try:
+        tests = _select_tests(tests, requested_test=args.test)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        sys.exit(2)
 
     failed = 0
     skipped = 0

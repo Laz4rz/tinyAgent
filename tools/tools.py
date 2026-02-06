@@ -1,18 +1,22 @@
 import time
 import sys
-import pyautogui
+
+from .helpers import normalized_to_pixels
 
 
-def move_mouse(x: int, y: int) -> str:
-    """Move mouse cursor to absolute screen coordinates.
+def move_mouse(x: float, y: float) -> str:
+    """Move mouse cursor to normalized screen coordinates.
 
     Args:
-        x: Screen X coordinate in pixels (int).
-        y: Screen Y coordinate in pixels (int).
+        x: Normalized X in [0.0, 1.0] across screen width.
+        y: Normalized Y in [0.0, 1.0] across screen height.
     """
     try:
-        pyautogui.moveTo(int(x), int(y))
-        return f"Successfuly moved mouse to ({x}, {y})"
+        import pyautogui
+
+        px, py = normalized_to_pixels(x, y)
+        pyautogui.moveTo(px, py)
+        return f"Successfully moved mouse to ({x}, {y})"
     except Exception as exc:
         return f"Failed to move mouse to ({x}, {y}): {exc}"
 
@@ -26,9 +30,9 @@ def click(x: float, y: float, button: str = "left") -> str:
         button: "left" or "right" (case-insensitive). Defaults to "left".
     """
     try:
-        width, height = pyautogui.size()
-        px = int(float(x) * width)
-        py = int(float(y) * height)
+        import pyautogui
+
+        px, py = normalized_to_pixels(x, y)
         pyautogui.click(x=px, y=py, button=button.lower())
         return f"Successfully clicked {button} at ({x}, {y})"
     except Exception as exc:
@@ -49,6 +53,8 @@ def press_combo(*keys: str, hold_ms: int = 0) -> str:
     """
     pressed: list[str] = []
     try:
+        import pyautogui
+
         for key in keys:
             lowered = key.lower()
             if lowered == "mod":
@@ -65,3 +71,12 @@ def press_combo(*keys: str, hold_ms: int = 0) -> str:
         for key in reversed(pressed):
             pyautogui.keyUp(key)
     return f"Successfully pressed combo: {', '.join(keys)}"
+
+
+def return_to_user(message: str) -> str:
+    """Return control to the user with a final message or question.
+
+    Args:
+        message: What the user should see when the agent yields control.
+    """
+    return message
