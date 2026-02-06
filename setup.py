@@ -14,6 +14,7 @@ from tool_schema import make_tool_schema
 ToolFn = Callable[..., Any]
 ToolStrategy = str
 CONFIG_PATH = Path(".tinyagent.config.json")
+VALID_TOOL_STRATEGIES = {"ask", "auto"}
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,7 @@ def _session_config_from_dict(
         known = ", ".join(sorted(tool_registry))
         raise ValueError(f"config `tools` contains unknown tool. Known tools: {known}")
 
-    if not isinstance(tool_strategy, str) or tool_strategy not in {"ask", "auto"}:
+    if not isinstance(tool_strategy, str) or tool_strategy not in VALID_TOOL_STRATEGIES:
         raise ValueError("config `tool_strategy` must be `ask` or `auto`")
 
     return SessionConfig(
@@ -227,6 +228,17 @@ def reconfigure_session(
 
 def prompt_provider(*, providers: list[ProviderOption]) -> str:
     return _prompt_provider(providers=providers)
+
+
+def prompt_tool_strategy() -> ToolStrategy:
+    return _prompt_tool_strategy()
+
+
+def parse_tool_strategy(raw: str) -> ToolStrategy:
+    value = raw.strip().lower()
+    if value in VALID_TOOL_STRATEGIES:
+        return value
+    raise ValueError("Invalid strategy. Use `ask` or `auto`.")
 
 
 def _section(title: str) -> None:
@@ -562,6 +574,7 @@ def _prompt_tool_strategy() -> ToolStrategy:
         if raw == "":
             print("Tool strategy is required.")
             continue
-        if raw in {"ask", "auto"}:
-            return raw
-        print("Invalid strategy. Use `ask` or `auto`.")
+        try:
+            return parse_tool_strategy(raw)
+        except ValueError as exc:
+            print(str(exc))

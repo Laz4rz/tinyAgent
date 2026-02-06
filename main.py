@@ -13,8 +13,11 @@ from setup import (
     SessionConfig,
     config_path,
     ensure_session_config,
+    parse_tool_strategy,
     parse_tool_selection,
+    prompt_tool_strategy,
     reconfigure_session,
+    save_session_config,
 )
 from tools import click, move_mouse, press_combo, return_to_user
 from utils import (
@@ -56,6 +59,7 @@ HELP_COMMANDS = {"/help"}
 HISTORY_COMMANDS = {"/history"}
 RECONFIGURE_COMMANDS = {"/reconfigure"}
 CLEAN_COMMANDS = {"/clean"}
+STRATEGY_COMMANDS = {"/strategy"}
 SHARED_SECRET_PATH = ".secret"
 API_ENV_BY_PROVIDER = {
     "google": "GEMINI_API_KEY",
@@ -320,9 +324,10 @@ def main() -> None:
         tool_registry=TOOL_REGISTRY,
         handoff_tool_name=return_to_user.__name__,
     )
+    session_config = resolved_config
 
-    api_key = _load_provider_api_key(resolved_config.provider)
-    runtime = _build_runtime_session(api_key, resolved_config)
+    api_key = _load_provider_api_key(session_config.provider)
+    runtime = _build_runtime_session(api_key, session_config)
     deferred_tool_results: list[DeferredToolResult] = []
 
     print_section("Session Ready")
@@ -354,6 +359,7 @@ def main() -> None:
                 runtime.client.close()
                 api_key = _load_provider_api_key(new_config.provider)
                 runtime = _build_runtime_session(api_key, new_config)
+                session_config = new_config
                 deferred_tool_results = []
                 print_section("Session Reconfigured")
                 print_session_status(
@@ -367,6 +373,31 @@ def main() -> None:
                 runtime.client.clear_history()
                 deferred_tool_results = []
                 print_success("Conversation history cleared.")
+                continue
+            if user_input in STRATEGY_COMMANDS or user_input.startswith("/strategy "):
+                if user_input in STRATEGY_COMMANDS:
+                    new_strategy = prompt_tool_strategy()
+                else:
+                    raw_strategy = user_input.split(maxsplit=1)[1]
+                    try:
+                        new_strategy = parse_tool_strategy(raw_strategy)
+                    except ValueError as exc:
+                        print_warning(str(exc))
+                        continue
+
+                if new_strategy == session_config.tool_strategy:
+                    print_info(f"Tool strategy already set to `{new_strategy}`.")
+                    continue
+
+                session_config = SessionConfig(
+                    provider=session_config.provider,
+                    model=session_config.model,
+                    tools=list(session_config.tools),
+                    tool_strategy=new_strategy,
+                )
+                save_session_config(config_file, session_config)
+                runtime.auto_approve_tools = new_strategy == "auto"
+                print_success(f"Tool strategy set to `{new_strategy}` and saved.")
                 continue
             if user_input == "/status":
                 print_session_status(

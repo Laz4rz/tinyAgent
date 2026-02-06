@@ -97,6 +97,7 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("main_cli_args_debug", test_main_cli_args_debug),
         ("main_provider_options", test_main_provider_options),
         ("main_reconfigure_command", test_main_reconfigure_command),
+        ("main_strategy_command", test_main_strategy_command),
         ("main_clean_command", test_main_clean_command),
         ("main_tool_approval_abort", test_main_tool_approval_abort),
         ("main_api_error_handling", test_main_api_error_handling),
@@ -114,6 +115,7 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("api_key_shared_secret", test_api_key_shared_secret),
         ("session_config_fixed_path", test_session_config_fixed_path),
         ("session_config_roundtrip", test_session_config_roundtrip),
+        ("session_parse_tool_strategy", test_session_parse_tool_strategy),
         ("known_models_constants", test_known_models_constants),
         ("main_tool_selection_parse", test_main_tool_selection_parse),
         ("history_object", test_history_object),
@@ -411,11 +413,45 @@ def test_session_config_fixed_path() -> None:
     assert resolved == Path.cwd() / CONFIG_PATH
 
 
+def test_session_parse_tool_strategy() -> None:
+    from setup import parse_tool_strategy
+
+    ask = parse_tool_strategy("ask")
+    auto = parse_tool_strategy("AUTO")
+
+    _print_block(
+        "session.parse_tool_strategy",
+        {
+            "ask": ask,
+            "auto": auto,
+        },
+    )
+
+    assert ask == "ask"
+    assert auto == "auto"
+
+    try:
+        parse_tool_strategy("nope")
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Invalid strategy should raise ValueError.")
+
+    assert "Invalid strategy" in message
+
+
 def test_main_reconfigure_command() -> None:
     from main import RECONFIGURE_COMMANDS
 
     _print_block("main.reconfigure_command", {"commands": sorted(RECONFIGURE_COMMANDS)})
     assert "/reconfigure" in RECONFIGURE_COMMANDS
+
+
+def test_main_strategy_command() -> None:
+    from main import STRATEGY_COMMANDS
+
+    _print_block("main.strategy_command", {"commands": sorted(STRATEGY_COMMANDS)})
+    assert "/strategy" in STRATEGY_COMMANDS
 
 
 def test_main_provider_options() -> None:

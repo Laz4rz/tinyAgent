@@ -114,6 +114,7 @@ For interactive computer-use sessions:
 24. For OpenAI stateless Responses mode (`store=false`), request `reasoning.encrypted_content` in `include` and replay reasoning/tool/message protocol items without reasoning-id references to avoid not-found errors.
 25. For handoff pauses, use the next user input as the deferred `return_to_user` tool result and do not duplicate it as a second plain user text turn; for abort pauses, send deferred tool result plus the next user message.
 26. For Gemini tool loops, preserve `thought_signature` across history replay, including signatures attached to `function_call` parts and signature-only thought parts, to stay aligned with Gemini function-calling protocol guidance.
+27. Keep a dedicated runtime command to update and persist tool approval strategy (`ask`/`auto`) without full reconfiguration.
 
 ## Testing Philosophy
 1. Keep fast local tests for core logic (history, preprocessing, schema behavior).
