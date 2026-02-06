@@ -20,7 +20,11 @@ from tools import click, move_mouse, press_combo, return_to_user
 from utils import (
     ask_tool_approval,
     emit_message,
+    format_control_note,
+    format_protocol_note,
     format_tool_request,
+    format_tool_result,
+    format_thinking_summary,
     init_output_style,
     print_error,
     print_info,
@@ -167,13 +171,17 @@ def _run_agent_until_handoff(
                 **request_config,
             )
         except Exception as exc:
-            print_error(f"[error] {exc}")
+            print_error(f"error: {exc}")
             return []
 
         try:
             function_calls = client.extract_tool_calls(response)
         except ValueError as exc:
-            emit_message(client, role="user", text=f"[protocol] invalid tool-call payload: {exc}")
+            emit_message(
+                client,
+                role="user",
+                text=format_protocol_note(f"invalid tool-call payload: {exc}"),
+            )
             continue
 
         thinking_summaries = client.extract_thinking_summaries(response)
@@ -181,7 +189,7 @@ def _run_agent_until_handoff(
 
         for summary in thinking_summaries:
             if summary.text:
-                print_role("model", f"[thinking-summary] {summary.text}")
+                print_role("model", format_thinking_summary(summary.text))
         if model_text:
             print_role("model", model_text)
         for tool_call in function_calls:
@@ -197,18 +205,17 @@ def _run_agent_until_handoff(
             missing_function_call_rounds += 1
             if missing_function_call_rounds > 3:
                 failure = (
-                    "[protocol] Model repeatedly skipped tool calls "
+                    "Model repeatedly skipped tool calls "
                     "(including return_to_user). Stopping run."
                 )
-                emit_message(client, role="user", text=failure)
+                emit_message(client, role="user", text=format_protocol_note(failure))
                 raise RuntimeError("Model repeatedly skipped tool calls (including return_to_user).")
 
             reminder = (
                 "Protocol reminder: you must call a tool. "
                 "If you are done or need user input, call return_to_user(message=...)."
             )
-            tagged_reminder = f"[protocol] {reminder}"
-            emit_message(client, role="user", text=tagged_reminder)
+            emit_message(client, role="user", text=format_protocol_note(reminder))
             continue
 
         missing_function_call_rounds = 0
@@ -254,8 +261,7 @@ def _run_agent_until_handoff(
                     )
 
             if not aborted_by_user:
-                tagged_result = f"[tool-response] {name} result: {tool_result}"
-                print_role("user", tagged_result)
+                print_role("user", format_tool_result(name, tool_result))
                 client.add_tool_result(
                     name=name,
                     result=tool_result,
@@ -264,7 +270,7 @@ def _run_agent_until_handoff(
                 )
 
             if aborted_by_user:
-                print_role("user", "[control] Execution paused. Waiting for user instruction.")
+                print_role("user", format_control_note("Execution paused. Waiting for user instruction."))
                 return [
                     DeferredToolResult(
                         name=name,
@@ -288,8 +294,7 @@ def _apply_deferred_tool_results(
             consumed_next_user_message = True
         else:
             result_text = deferred.result_text
-        tagged_result = f"[tool-response] {deferred.name} result: {result_text}"
-        print_role("user", tagged_result)
+        print_role("user", format_tool_result(deferred.name, result_text))
         client.add_tool_result(
             name=deferred.name,
             result=result_text,
@@ -372,11 +377,11 @@ def main() -> None:
                 )
                 continue
             if user_input == "/tools":
-                print_info("\n[tools]")
+                print_section("Tools")
                 print_info(", ".join(fn.__name__ for fn in runtime.agent_tools))
                 continue
             if user_input in HISTORY_COMMANDS:
-                print_info("\n[history]")
+                print_section("History")
                 print(runtime.client.format_history())
                 continue
             if not user_input:

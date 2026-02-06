@@ -487,7 +487,7 @@ def test_utils_emit_message() -> None:
         },
     )
 
-    assert "user>" in rendered
+    assert "you" in rendered
     assert "[protocol] test-message" in rendered
     assert client.history[-1].role == "user"
     assert client.history[-1].parts[0].text == "[protocol] test-message"
@@ -1287,7 +1287,7 @@ def test_main_api_error_handling() -> None:
 
     rendered = _strip_ansi(out.getvalue())
     _print_block("main.api_error_handling", {"printed": rendered.strip()})
-    assert "[error] simulated API failure" in rendered
+    assert "error: simulated API failure" in rendered
 
 
 def test_main_tool_selection_parse() -> None:

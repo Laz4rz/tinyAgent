@@ -105,11 +105,11 @@ For interactive computer-use sessions:
 15. Keep `main.py` as a lean interaction entrypoint; move argument parsing and utility/helper functions into dedicated modules.
 16. Keep print/store parity in the runtime loop: any message appended to model history must be echoed to terminal output in the same step.
 17. Store model tool-call intents and tool results as structured history entries (not bracketed plain-text logs) so encoded provider requests stay close to native API formats.
-18. Treat provider API failures as external-boundary errors: catch around model request calls, print a red `[error] ...` line, and return control to user without crashing the process.
+18. Treat provider API failures as external-boundary errors: catch around model request calls, print a clear red `error: ...` line, and return control to user without crashing the process.
 19. Keep an explicit `--debug` CLI mode that records per-turn screenshots plus raw model request/response payloads under a timestamped `debug/` run directory.
 20. Keep debug payload artifacts human-inspectable by writing pretty JSON files (indented arrays) instead of dense single-line logs.
-21. When providers expose model reasoning/thinking summaries, print them in the CLI as tagged model messages (for example `[thinking-summary] ...`) for better tool-action traceability.
-22. Before each model API call in the interactive loop, print an explicit model-status line indicating that the CLI is waiting for a response.
+21. When providers expose model reasoning/thinking summaries, print them as readable model notes (for example `thinking · ...`) for tool-action traceability without noisy bracket tags.
+22. Before each model API call in the interactive loop, show a waiting indicator; in TTY mode keep it transient and clear it when the response arrives.
 23. For tool-using turns, keep encoded history close to provider-native protocol items (for example OpenAI `reasoning`/`function_call`/`function_call_output`, Gemini `thought`/`function_call`/`function_response`) instead of flattening these into synthetic bracketed text messages.
 24. For OpenAI stateless Responses mode (`store=false`), request `reasoning.encrypted_content` in `include` and replay reasoning/tool/message protocol items without reasoning-id references to avoid not-found errors.
 25. For handoff pauses, use the next user input as the deferred `return_to_user` tool result and do not duplicate it as a second plain user text turn; for abort pauses, send deferred tool result plus the next user message.

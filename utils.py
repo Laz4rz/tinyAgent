@@ -28,12 +28,17 @@ ROLE_COLORS: dict[RoleName, str] = {
     "user": "\033[38;5;39m",
     "model": "\033[38;5;82m",
 }
+ROLE_TITLES: dict[RoleName, str] = {
+    "user": "you",
+    "model": "agent",
+}
 STYLE_SECTION = "\033[1;36m"
 STYLE_INFO = "\033[38;5;111m"
 STYLE_SUCCESS = "\033[38;5;82m"
 STYLE_WARNING = "\033[38;5;214m"
 STYLE_ERROR = "\033[38;5;203m"
 COLOR_ENABLED = False
+_PENDING_MODEL_WAITING_LINE = False
 
 
 def init_output_style() -> None:
@@ -65,16 +70,30 @@ def _style(text: str, color_code: str) -> str:
     return f"{color_code}{text}{ANSI_RESET}"
 
 
+def _clear_pending_model_waiting_line() -> None:
+    global _PENDING_MODEL_WAITING_LINE
+    if not _PENDING_MODEL_WAITING_LINE:
+        return
+    print("\r\033[2K", end="", flush=True)
+    _PENDING_MODEL_WAITING_LINE = False
+
+
 def role_label(role: RoleName) -> str:
-    return _style(f"{role}>", ROLE_COLORS[role])
+    return _style(ROLE_TITLES[role], ROLE_COLORS[role])
 
 
 def print_section(title: str) -> None:
+    _clear_pending_model_waiting_line()
     print(f"\n{_style(f'=== {title} ===', STYLE_SECTION)}")
 
 
 def print_role(role: RoleName, text: str) -> None:
-    print(f"\n{role_label(role)} {text}")
+    _clear_pending_model_waiting_line()
+    lines = text.splitlines() or [""]
+    marker = _style("●", ROLE_COLORS[role])
+    print(f"\n{marker} {role_label(role)}  {lines[0]}")
+    for line in lines[1:]:
+        print(f"   {line}")
 
 
 def emit_message(target: TextSink, *, role: RoleName, text: str) -> None:
@@ -83,27 +102,42 @@ def emit_message(target: TextSink, *, role: RoleName, text: str) -> None:
 
 
 def print_info(text: str) -> None:
+    _clear_pending_model_waiting_line()
     print(_style(text, STYLE_INFO))
 
 
 def print_success(text: str) -> None:
+    _clear_pending_model_waiting_line()
     print(_style(text, STYLE_SUCCESS))
 
 
 def print_warning(text: str) -> None:
+    _clear_pending_model_waiting_line()
     print(_style(text, STYLE_WARNING))
 
 
 def print_error(text: str) -> None:
+    _clear_pending_model_waiting_line()
     print(_style(text, STYLE_ERROR))
 
 
 def print_model_waiting() -> None:
-    print_role("model", "[status] waiting for response...")
+    global _PENDING_MODEL_WAITING_LINE
+    _clear_pending_model_waiting_line()
+
+    if not sys.stdout.isatty():
+        print_role("model", "thinking...")
+        return
+
+    marker = _style("●", ROLE_COLORS["model"])
+    waiting = _style("thinking...", STYLE_INFO)
+    print(f"\n{marker} {role_label('model')}  {waiting}", end="", flush=True)
+    _PENDING_MODEL_WAITING_LINE = True
 
 
 def user_prompt() -> str:
-    return f"\n{role_label('user')} "
+    _clear_pending_model_waiting_line()
+    return f"\n{_style('you ›', ROLE_COLORS['user'])} "
 
 
 def print_session_help() -> None:
@@ -125,6 +159,7 @@ def print_session_status(*, provider_label: str, model: str, tools: list[str], a
 
 
 def ask_tool_approval(prompt: str, *, default: ToolApproval = "deny") -> ToolApproval:
+    _clear_pending_model_waiting_line()
     if default not in {"approve", "deny", "abort"}:
         raise ValueError("default tool approval must be approve, deny, or abort")
 
@@ -157,7 +192,23 @@ def run_tool(tool_fn: ToolFn, args: dict[str, Any]) -> str:
 
 
 def format_tool_request(name: str, args: dict[str, Any]) -> str:
-    return f"[tool-request] {name} {json.dumps(args)}"
+    return f"tool request · {name} {json.dumps(args, ensure_ascii=False)}"
+
+
+def format_tool_result(name: str, result: str) -> str:
+    return f"tool result · {name}: {result}"
+
+
+def format_protocol_note(text: str) -> str:
+    return f"protocol · {text}"
+
+
+def format_control_note(text: str) -> str:
+    return f"control · {text}"
+
+
+def format_thinking_summary(text: str) -> str:
+    return f"thinking · {text}"
 
 
 def parse_main_cli_args(argv: list[str]) -> MainCliArgs:
