@@ -10,10 +10,24 @@ KNOWN_MODEL_IDS_BY_PROVIDER: dict[str, tuple[str, ...]] = {
         "gemini-1.5-pro",
         "gemini-1.5-flash",
     ),
-}
-
-DEFAULT_MODEL_BY_PROVIDER: dict[str, str] = {
-    "google": "gemini-2.5-flash",
+    "openai": (
+        # Chat Completions-oriented IDs from OpenAI docs (checked 2026-02-06).
+        "gpt-5.2-chat-latest",
+        "gpt-5.2",
+        "gpt-5.1-chat-latest",
+        "gpt-5.1",
+        "gpt-5-chat-latest",
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "o3",
+        "o4-mini",
+        "gpt-4o",
+        "gpt-4o-mini",
+    ),
 }
 
 
@@ -24,16 +38,11 @@ def known_models(provider: str) -> list[str]:
     return list(model_ids)
 
 
-def default_model(provider: str) -> str:
-    model_id = DEFAULT_MODEL_BY_PROVIDER.get(provider)
-    if model_id is None:
-        raise ValueError(f"Unknown provider: {provider}")
-    return model_id
-
-
 def list_live_models(provider: str, api_key: str) -> list[str]:
     if provider == "google":
         return _list_google_models(api_key)
+    if provider == "openai":
+        return _list_openai_models(api_key)
     raise ValueError(f"Live model listing is not implemented for provider: {provider}")
 
 
@@ -56,5 +65,18 @@ def _list_google_models(api_key: str) -> list[str]:
             raise RuntimeError("No Gemini models with generateContent support were returned.")
 
         return sorted(names)
+    finally:
+        client.close()
+
+
+def _list_openai_models(api_key: str) -> list[str]:
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+    try:
+        names = sorted(model.id for model in client.models.list().data)
+        if not names:
+            raise RuntimeError("No OpenAI models were returned.")
+        return names
     finally:
         client.close()

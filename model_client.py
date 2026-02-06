@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import io
+import json
 import mimetypes
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -41,6 +43,12 @@ class MessagePart:
 class Message:
     role: Role
     parts: list[MessagePart] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    name: str
+    args: dict[str, Any]
 
 
 @dataclass
@@ -110,6 +118,9 @@ class BaseModelClient(ABC):
     def set_system_prompt(self, prompt: str | None) -> None:
         self.system_prompt = prompt
 
+    def close(self) -> None:
+        return
+
     def add_text(self, text: str, *, role: Role = "user") -> None:
         self.history.add_text(text, role=role)
 
@@ -156,6 +167,12 @@ class BaseModelClient(ABC):
     def format_history(self, *, color: bool = True) -> str:
         return self.history.render(color=color)
 
+    def extract_response_text(self, response: Any) -> str:
+        return self._extract_text(response)
+
+    def extract_tool_calls(self, response: Any) -> list[ToolCall]:
+        return self._extract_tool_calls(response)
+
     def generate(
         self,
         *,
@@ -185,6 +202,9 @@ class BaseModelClient(ABC):
     ) -> tuple[bytes, str]:
         return data, mime_type
 
+    def tool_call_request_config(self, *, allowed_function_names: Iterable[str]) -> dict[str, Any]:
+        return {}
+
     @abstractmethod
     def _build_request_config(self, config_kwargs: dict[str, Any]) -> Any:
         raise NotImplementedError
@@ -201,6 +221,10 @@ class BaseModelClient(ABC):
     def _extract_text(self, response: Any) -> str:
         raise NotImplementedError
 
+    @abstractmethod
+    def _extract_tool_calls(self, response: Any) -> list[ToolCall]:
+        raise NotImplementedError
+
     def _build_provider_tools(self, tool_functions: Iterable[Callable[..., Any]]) -> list[Any]:
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement callable tool conversion."
@@ -212,7 +236,7 @@ class GeminiClient(BaseModelClient):
         self,
         *,
         api_key: str | None = None,
-        model: str = "gemini-2.5-flash",
+        model: str,
         system_prompt: str | None = None,
         tools: Iterable[Any] | None = None,
         **client_kwargs: Any,
@@ -272,15 +296,30 @@ class GeminiClient(BaseModelClient):
 
     def _extract_text(self, response: Any) -> str:
         lines: list[str] = []
-        candidates = getattr(response, "candidates", None) or []
-        for candidate in candidates:
-            content = getattr(candidate, "content", None)
-            parts = getattr(content, "parts", None) or []
-            for part in parts:
-                text = getattr(part, "text", None)
+        for candidate in response.candidates or []:
+            for part in candidate.content.parts or []:
+                text = part.text
                 if text:
                     lines.append(text)
         return "\n".join(lines).strip()
+
+    def _extract_tool_calls(self, response: Any) -> list[ToolCall]:
+        calls: list[ToolCall] = []
+        for candidate in response.candidates or []:
+            for part in candidate.content.parts or []:
+                function_call = part.function_call
+                if function_call is None:
+                    continue
+                name = function_call.name
+                if not name:
+                    raise ValueError("Gemini function call is missing `name`.")
+                calls.append(
+                    ToolCall(
+                        name=name,
+                        args=_normalize_tool_args(function_call.args),
+                    )
+                )
+        return calls
 
     def _build_provider_tools(self, tool_functions: Iterable[Callable[..., Any]]) -> list[Any]:
         from google.genai import types
@@ -296,6 +335,229 @@ class GeminiClient(BaseModelClient):
                 )
             )
         return [types.Tool(function_declarations=declarations)]
+
+    def tool_call_request_config(self, *, allowed_function_names: Iterable[str]) -> dict[str, Any]:
+        from google.genai import types
+
+        names = list(allowed_function_names)
+        return {
+            "tool_config": types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode="ANY",
+                    allowed_function_names=names,
+                )
+            )
+        }
+
+
+class OpenAIClient(BaseModelClient):
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str,
+        system_prompt: str | None = None,
+        tools: Iterable[Any] | None = None,
+        **client_kwargs: Any,
+    ) -> None:
+        super().__init__(model=model, system_prompt=system_prompt)
+        from openai import OpenAI
+
+        self._client = OpenAI(api_key=api_key, **client_kwargs)
+        if tools:
+            self.set_tools(tools)
+
+    def close(self) -> None:
+        self._client.close()
+
+    def _build_request_config(self, config_kwargs: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(config_kwargs)
+        if self.tools and "tools" not in merged:
+            merged["tools"] = self.tools
+        return merged
+
+    def _encode_history(self) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        if self.system_prompt is not None:
+            messages.append({"role": "system", "content": self.system_prompt})
+
+        for message in self.history:
+            if not message.parts:
+                continue
+
+            content_items: list[dict[str, Any]] = []
+            for part in message.parts:
+                if part.kind == "text":
+                    if part.text is None:
+                        raise ValueError("Text message part is missing text.")
+                    content_items.append({"type": "text", "text": part.text})
+                    continue
+
+                if part.kind == "image":
+                    if part.data is None or part.mime_type is None:
+                        raise ValueError("Image message part is missing data or mime_type.")
+                    encoded = base64.b64encode(part.data).decode("ascii")
+                    data_url = f"data:{part.mime_type};base64,{encoded}"
+                    content_items.append({"type": "image_url", "image_url": {"url": data_url}})
+                    continue
+
+                raise ValueError(f"Unsupported message part kind: {part.kind}")
+
+            if len(content_items) == 1 and content_items[0]["type"] == "text":
+                content: str | list[dict[str, Any]] = content_items[0]["text"]
+            else:
+                content = content_items
+
+            messages.append({"role": _openai_role(message.role), "content": content})
+
+        return messages
+
+    def _call_model(self, *, encoded_history: list[dict[str, Any]], request_config: dict[str, Any]) -> Any:
+        return self._client.chat.completions.create(
+            model=self.model,
+            messages=encoded_history,
+            **request_config,
+        )
+
+    def _extract_text(self, response: Any) -> str:
+        lines: list[str] = []
+        for choice in response.choices or []:
+            message = choice.message
+            if message is None:
+                continue
+
+            content = message.content
+            if isinstance(content, str):
+                if content:
+                    lines.append(content)
+                continue
+
+            if content is None:
+                continue
+
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        text = item.get("text")
+                    else:
+                        text = item.text
+                    if text:
+                        lines.append(text)
+                continue
+
+            raise ValueError(f"Unsupported OpenAI message content payload: {content!r}")
+
+        return "\n".join(lines).strip()
+
+    def _extract_tool_calls(self, response: Any) -> list[ToolCall]:
+        calls: list[ToolCall] = []
+        for choice in response.choices or []:
+            message = choice.message
+            if message is None:
+                continue
+            for tool_call in message.tool_calls or []:
+                function = tool_call.function
+                if function is None:
+                    raise ValueError("OpenAI tool call is missing `function`.")
+                name = function.name
+                if not name:
+                    raise ValueError("OpenAI tool call is missing function name.")
+                calls.append(
+                    ToolCall(
+                        name=name,
+                        args=_parse_openai_tool_arguments(function.arguments),
+                    )
+                )
+        return calls
+
+    def _build_provider_tools(self, tool_functions: Iterable[Callable[..., Any]]) -> list[Any]:
+        declarations: list[dict[str, Any]] = []
+        for fn in tool_functions:
+            schema = make_tool_schema(fn)
+            declarations.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": schema["name"],
+                        "description": schema["description"],
+                        "parameters": schema["parameters"],
+                    },
+                }
+            )
+        return declarations
+
+    def tool_call_request_config(self, *, allowed_function_names: Iterable[str]) -> dict[str, Any]:
+        names = list(allowed_function_names)
+        if len(names) == 1:
+            return {
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": names[0]},
+                }
+            }
+        return {"tool_choice": "required"}
+
+
+def build_model_client(
+    *,
+    provider: str,
+    api_key: str,
+    model: str,
+    system_prompt: str | None = None,
+) -> BaseModelClient:
+    if provider == "google":
+        return GeminiClient(api_key=api_key, model=model, system_prompt=system_prompt)
+    if provider == "openai":
+        return OpenAIClient(api_key=api_key, model=model, system_prompt=system_prompt)
+    raise ValueError(f"Unsupported provider: {provider}")
+
+
+def _normalize_tool_args(args: Any) -> dict[str, Any]:
+    if args is None:
+        return {}
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str):
+        payload = json.loads(args)
+        if not isinstance(payload, dict):
+            raise ValueError("Tool args JSON payload must decode to an object.")
+        return payload
+
+    message_to_dict = None
+    try:
+        from google.protobuf.json_format import MessageToDict
+    except ModuleNotFoundError:
+        pass
+    else:
+        message_to_dict = MessageToDict
+
+    if message_to_dict is not None:
+        try:
+            payload = message_to_dict(args)
+        except (AttributeError, TypeError, ValueError):
+            payload = None
+        if payload is not None:
+            if not isinstance(payload, dict):
+                raise ValueError("Structured tool args payload must decode to an object.")
+            return payload
+
+    try:
+        payload = dict(args)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Unsupported tool args payload: {args!r}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("Tool args payload must be an object.")
+    return payload
+
+
+def _parse_openai_tool_arguments(arguments: str | None) -> dict[str, Any]:
+    if arguments is None or arguments == "":
+        return {}
+    payload = json.loads(arguments)
+    if not isinstance(payload, dict):
+        raise ValueError("OpenAI function arguments must decode to a JSON object.")
+    return payload
 
 
 def _guess_mime_type(path: Path) -> str:
@@ -317,6 +579,18 @@ def _gemini_role(role: Role) -> str:
     if role in {"tool", "system"}:
         return "user"
     raise ValueError(f"Unsupported history role for Gemini encoding: {role}")
+
+
+def _openai_role(role: Role) -> str:
+    if role == "user":
+        return "user"
+    if role == "model":
+        return "assistant"
+    if role == "system":
+        return "system"
+    if role == "tool":
+        return "user"
+    raise ValueError(f"Unsupported history role for OpenAI encoding: {role}")
 
 
 def _json_schema_to_gemini(schema: dict[str, Any]) -> Any:

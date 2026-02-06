@@ -14,6 +14,14 @@ First run behavior:
 3. Saves those values to `.tinyagent.config.json`.
 4. In interactive terminals, setup uses arrow-key selection and checkbox-style tool toggles.
 
+Supported providers:
+1. Google Gemini (`GEMINI_API_KEY`)
+2. OpenAI (`OPENAI_API_KEY`)
+
+API key storage:
+1. Uses one shared `.secret` file in the working directory.
+2. The file stores keys as JSON by env-var name (for example `GEMINI_API_KEY`, `OPENAI_API_KEY`).
+
 Notes:
 1. The model yields control only through `return_to_user`.
 2. Setup picker controls: `↑/↓` move, `Space` toggle checkbox, `Enter` confirm.

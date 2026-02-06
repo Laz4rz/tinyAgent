@@ -1,7 +1,7 @@
 import time
 import sys
 
-from .helpers import normalized_to_pixels
+from .helpers import modifier_keys, normalized_to_pixels, release_keys, resolve_combo_key
 
 
 def move_mouse(x: float, y: float) -> str:
@@ -51,26 +51,39 @@ def press_combo(*keys: str, hold_ms: int = 0) -> str:
     Example:
         press_combo("ctrl", "a", hold_ms=50)
     """
-    pressed: list[str] = []
     try:
         import pyautogui
+    except Exception as exc:
+        return f"Failed to press combo {', '.join(keys)}: {exc}"
 
+    pressed: list[str] = []
+    error_message: str | None = None
+    try:
         for key in keys:
-            lowered = key.lower()
-            if lowered == "mod":
-                lowered = "command" if sys.platform == "darwin" else "ctrl"
-            elif lowered == "cmd":
-                lowered = "command"
+            lowered = resolve_combo_key(key, platform_name=sys.platform)
             pyautogui.keyDown(lowered)
             pressed.append(lowered)
         if hold_ms:
             time.sleep(hold_ms / 1000)
     except Exception as exc:
-        return f"Failed to press combo {', '.join(keys)}: {exc}"
+        error_message = str(exc)
     finally:
-        for key in reversed(pressed):
-            pyautogui.keyUp(key)
-    return f"Successfully pressed combo: {', '.join(keys)}"
+        release_targets = list(dict.fromkeys([*reversed(pressed), *modifier_keys()]))
+        release_errors = release_keys(pyautogui, release_targets)
+
+    combo = ", ".join(keys)
+    if error_message:
+        if release_errors:
+            return (
+                f"Failed to press combo {combo}: {error_message}. "
+                f"Key release errors: {'; '.join(release_errors)}"
+            )
+        return f"Failed to press combo {combo}: {error_message}"
+
+    if release_errors:
+        return f"Failed to fully release combo {combo}: {'; '.join(release_errors)}"
+
+    return f"Successfully pressed combo: {combo}"
 
 
 def return_to_user(message: str) -> str:

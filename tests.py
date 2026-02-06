@@ -5,11 +5,12 @@ import re
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 from typing import Any
 
 from api_key import load_api_key
-from model_client import BaseModelClient, GeminiClient, ImageSettings
+from model_client import BaseModelClient, GeminiClient, ImageSettings, ToolCall
 from tool_schema import make_tool_schema
 
 
@@ -32,6 +33,10 @@ class _StubClient(BaseModelClient):
 
     def _extract_text(self, response: dict[str, str]) -> str:
         return response["text"]
+
+    def _extract_tool_calls(self, response: dict[str, str]) -> list[ToolCall]:
+        _ = response
+        return []
 
 
 def _print_block(title: str, payload) -> None:
@@ -89,22 +94,27 @@ def _args_to_dict(args) -> dict:
 
 def _all_tests() -> list[tuple[str, Any]]:
     return [
+        ("main_provider_options", test_main_provider_options),
         ("main_reconfigure_command", test_main_reconfigure_command),
         ("main_clean_command", test_main_clean_command),
         ("main_tool_approval_abort", test_main_tool_approval_abort),
         ("main_api_error_handling", test_main_api_error_handling),
         ("main_tool_request_history", test_main_tool_request_history),
+        ("main_tool_request_history_openai_shape", test_main_tool_request_history_openai_shape),
         ("utils_emit_message", test_utils_emit_message),
+        ("model_client_extract_openai_response", test_model_client_extract_openai_response),
+        ("api_key_shared_secret", test_api_key_shared_secret),
         ("session_config_fixed_path", test_session_config_fixed_path),
         ("session_config_roundtrip", test_session_config_roundtrip),
         ("known_models_constants", test_known_models_constants),
         ("main_tool_selection_parse", test_main_tool_selection_parse),
-        ("main_extract_response_text", test_main_extract_response_text),
         ("history_object", test_history_object),
         ("history_visualization_text_and_image", test_history_visualization_text_and_image),
         ("return_to_user_tool", test_return_to_user_tool),
         ("image_auto_downsize_default", test_image_auto_downsize_default),
         ("image_preprocess_settings", test_image_preprocess_settings),
+        ("press_combo_releases_on_failsafe", test_press_combo_releases_on_failsafe),
+        ("press_combo_stuck_key_recovery", test_press_combo_stuck_key_recovery),
         ("tools_gui", test_tools_gui),
         ("tool_schemas", test_tool_schemas),
         ("gemini_init", test_init),
@@ -242,21 +252,70 @@ def test_history_object() -> None:
 
 
 def test_known_models_constants() -> None:
-    from models import DEFAULT_MODEL_BY_PROVIDER, KNOWN_MODEL_IDS_BY_PROVIDER, default_model, known_models
+    from models import KNOWN_MODEL_IDS_BY_PROVIDER, known_models
 
     _print_block(
         "models.constants",
         {
             "providers": sorted(KNOWN_MODEL_IDS_BY_PROVIDER.keys()),
-            "default_google": default_model("google"),
+            "top_openai": known_models("openai")[:5],
         },
     )
 
     google_known = known_models("google")
+    openai_known = known_models("openai")
     assert len(google_known) >= 1
+    assert len(openai_known) >= 1
     assert len(set(google_known)) == len(google_known)
-    assert default_model("google") in google_known
-    assert DEFAULT_MODEL_BY_PROVIDER["google"] == default_model("google")
+    assert len(set(openai_known)) == len(openai_known)
+    assert "gpt-5.2" in openai_known
+    assert "gpt-4o-mini" in openai_known
+
+
+def test_api_key_shared_secret() -> None:
+    import os
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        secret_path = Path(tmp_dir) / ".secret"
+        secret_path.write_text(
+            json.dumps(
+                {
+                    "GEMINI_API_KEY": "gem-key",
+                    "OPENAI_API_KEY": "openai-key",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        original_gemini = os.environ.get("GEMINI_API_KEY")
+        original_openai = os.environ.get("OPENAI_API_KEY")
+        os.environ.pop("GEMINI_API_KEY", None)
+        os.environ.pop("OPENAI_API_KEY", None)
+
+        try:
+            gemini = load_api_key("GEMINI_API_KEY", secret_path=secret_path, prompt=False)
+            openai = load_api_key("OPENAI_API_KEY", secret_path=secret_path, prompt=False)
+        finally:
+            if original_gemini is None:
+                os.environ.pop("GEMINI_API_KEY", None)
+            else:
+                os.environ["GEMINI_API_KEY"] = original_gemini
+            if original_openai is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = original_openai
+
+        _print_block(
+            "api_key.shared_secret",
+            {
+                "gemini": gemini,
+                "openai": openai,
+                "path": str(secret_path),
+            },
+        )
+
+        assert gemini == "gem-key"
+        assert openai == "openai-key"
 
 
 def test_session_config_roundtrip() -> None:
@@ -313,6 +372,16 @@ def test_main_reconfigure_command() -> None:
 
     _print_block("main.reconfigure_command", {"commands": sorted(RECONFIGURE_COMMANDS)})
     assert "/reconfigure" in RECONFIGURE_COMMANDS
+
+
+def test_main_provider_options() -> None:
+    from main import PROVIDERS
+
+    keys = [provider.key for provider in PROVIDERS]
+    labels = [provider.label for provider in PROVIDERS]
+    _print_block("main.provider_options", {"keys": keys, "labels": labels})
+    assert "google" in keys
+    assert "openai" in keys
 
 
 def test_main_clean_command() -> None:
@@ -380,12 +449,68 @@ def test_utils_emit_message() -> None:
     assert client.history[-1].parts[0].text == "[protocol] test-message"
 
 
-def test_main_tool_request_history() -> None:
-    try:
-        from google.genai import types as _types  # noqa: F401
-    except ModuleNotFoundError as exc:
-        raise SkipTest("google-genai is required for loop tests") from exc
+def test_model_client_extract_openai_response() -> None:
+    from model_client import OpenAIClient
 
+    class _Function:
+        def __init__(self, name: str, arguments: str) -> None:
+            self.name = name
+            self.arguments = arguments
+
+    class _ToolCall:
+        def __init__(self, function: _Function) -> None:
+            self.function = function
+
+    class _Message:
+        def __init__(self, content: str, tool_calls: list[_ToolCall]) -> None:
+            self.content = content
+            self.tool_calls = tool_calls
+
+    class _Choice:
+        def __init__(self, message: _Message) -> None:
+            self.message = message
+
+    class _Response:
+        def __init__(self, choices: list[_Choice]) -> None:
+            self.choices = choices
+
+    try:
+        client = OpenAIClient(api_key="test-key", model="gpt-4.1-mini")
+    except ModuleNotFoundError as exc:
+        raise SkipTest("openai is required for OpenAI parsing tests") from exc
+    try:
+        response = _Response(
+            [
+                _Choice(
+                    _Message(
+                        content="openai-response",
+                        tool_calls=[_ToolCall(_Function("click", '{"x": 0.1, "y": 0.9}'))],
+                    )
+                )
+            ]
+        )
+
+        text = client.extract_response_text(response)
+        calls = client.extract_tool_calls(response)
+
+        _print_block(
+            "model_client.extract_openai_response",
+            {
+                "text": text,
+                "tool_name": calls[0].name,
+                "args": calls[0].args,
+            },
+        )
+
+        assert text == "openai-response"
+        assert len(calls) == 1
+        assert calls[0].name == "click"
+        assert calls[0].args == {"x": 0.1, "y": 0.9}
+    finally:
+        client.close()
+
+
+def test_main_tool_request_history() -> None:
     from main import _run_agent_until_handoff
     from tools import return_to_user
 
@@ -403,8 +528,21 @@ def test_main_tool_request_history() -> None:
         def __init__(self) -> None:
             self.history: list[tuple[str, str]] = []
 
+        def tool_call_request_config(self, *, allowed_function_names: list[str]) -> dict[str, Any]:
+            _ = allowed_function_names
+            return {}
+
         def generate(self, **kwargs: Any) -> _FakeResponse:
+            _ = kwargs
             return _FakeResponse([_FakeCall("return_to_user", {"message": "Done."})])
+
+        def extract_response_text(self, response: _FakeResponse) -> str:
+            _ = response
+            return ""
+
+        def extract_tool_calls(self, response: _FakeResponse) -> list[ToolCall]:
+            call = response.function_calls[0]
+            return [ToolCall(name=call.name, args=call.args)]
 
         def add_text(self, text: str, *, role: str = "user") -> None:
             self.history.append((role, text))
@@ -428,19 +566,98 @@ def test_main_tool_request_history() -> None:
     assert fake_client.history[1] == ("model", "Done.")
 
 
+def test_main_tool_request_history_openai_shape() -> None:
+    from main import _run_agent_until_handoff
+    from tools import return_to_user
+
+    class _Function:
+        def __init__(self, name: str, arguments: str) -> None:
+            self.name = name
+            self.arguments = arguments
+
+    class _ToolCall:
+        def __init__(self, function: _Function) -> None:
+            self.function = function
+
+    class _Message:
+        def __init__(self, tool_calls: list[_ToolCall]) -> None:
+            self.tool_calls = tool_calls
+            self.content = ""
+
+    class _Choice:
+        def __init__(self, message: _Message) -> None:
+            self.message = message
+
+    class _Response:
+        def __init__(self, choices: list[_Choice]) -> None:
+            self.choices = choices
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.history: list[tuple[str, str]] = []
+
+        def tool_call_request_config(self, *, allowed_function_names: list[str]) -> dict[str, Any]:
+            _ = allowed_function_names
+            return {}
+
+        def generate(self, **kwargs: Any) -> _Response:
+            _ = kwargs
+            return _Response(
+                [
+                    _Choice(
+                        _Message(
+                            [
+                                _ToolCall(
+                                    _Function("return_to_user", '{"message": "Done from OpenAI."}')
+                                )
+                            ]
+                        )
+                    )
+                ]
+            )
+
+        def extract_response_text(self, response: _Response) -> str:
+            _ = response
+            return ""
+
+        def extract_tool_calls(self, response: _Response) -> list[ToolCall]:
+            function = response.choices[0].message.tool_calls[0].function
+            return [ToolCall(name=function.name, args=json.loads(function.arguments))]
+
+        def add_text(self, text: str, *, role: str = "user") -> None:
+            self.history.append((role, text))
+
+    fake_client = _FakeClient()
+    _run_agent_until_handoff(
+        fake_client,  # type: ignore[arg-type]
+        [return_to_user],
+        auto_approve_tools=False,
+    )
+
+    _print_block(
+        "main.tool_request_history_openai_shape",
+        {
+            "history": fake_client.history,
+        },
+    )
+    assert len(fake_client.history) == 2
+    assert fake_client.history[0][0] == "model"
+    assert fake_client.history[0][1].startswith("[tool-request] return_to_user")
+    assert fake_client.history[1] == ("model", "Done from OpenAI.")
+
+
 def test_main_api_error_handling() -> None:
     import io
     from contextlib import redirect_stdout
-
-    try:
-        from google.genai import types as _types  # noqa: F401
-    except ModuleNotFoundError as exc:
-        raise SkipTest("google-genai is required for loop tests") from exc
 
     from main import _run_agent_until_handoff
     from tools import return_to_user
 
     class _ErrorClient:
+        def tool_call_request_config(self, *, allowed_function_names: list[str]) -> dict[str, Any]:
+            _ = allowed_function_names
+            return {}
+
         def generate(self, **kwargs: Any):  # noqa: ANN003
             raise RuntimeError("simulated API failure")
 
@@ -474,38 +691,6 @@ def test_main_tool_selection_parse() -> None:
     selected_names = [fn.__name__ for fn in selected]
     _print_block("main.tool_selection_parse", {"selected": selected_names})
     assert selected_names == ["move_mouse", "click"]
-
-
-def test_main_extract_response_text() -> None:
-    from utils import extract_response_text
-
-    class _Part:
-        def __init__(self, *, text=None, function_call=None):
-            self.text = text
-            self.function_call = function_call
-
-    class _Content:
-        def __init__(self, parts):
-            self.parts = parts
-
-    class _Candidate:
-        def __init__(self, content):
-            self.content = content
-
-    class _Response:
-        def __init__(self, candidates):
-            self.candidates = candidates
-
-    response = _Response(
-        candidates=[
-            _Candidate(_Content(parts=[_Part(text="first"), _Part(function_call=object())])),
-            _Candidate(_Content(parts=[_Part(text="second")])),
-        ]
-    )
-
-    text = extract_response_text(response)
-    _print_block("main.extract_response_text", {"text": text})
-    assert text == "first\nsecond"
 
 
 def test_history_visualization_text_and_image() -> None:
@@ -636,6 +821,94 @@ def test_image_auto_downsize_default() -> None:
     finally:
         if image_path is not None:
             image_path.unlink(missing_ok=True)
+
+
+def test_press_combo_releases_on_failsafe() -> None:
+    from tools.tools import press_combo
+
+    fake = types.ModuleType("pyautogui")
+    held: list[str] = []
+    fake.FAILSAFE = True
+
+    def _key_down(key: str) -> None:
+        held.append(key)
+
+    def _key_up(key: str) -> None:
+        if fake.FAILSAFE:
+            raise RuntimeError("failsafe blocked keyUp")
+        if key in held:
+            held.remove(key)
+
+    fake.keyDown = _key_down
+    fake.keyUp = _key_up
+
+    original = sys.modules.get("pyautogui")
+    sys.modules["pyautogui"] = fake
+    try:
+        result = press_combo("shift", "a")
+    finally:
+        if original is None:
+            del sys.modules["pyautogui"]
+        else:
+            sys.modules["pyautogui"] = original
+
+    _print_block(
+        "press_combo.releases_on_failsafe",
+        {
+            "result": result,
+            "held_after": held,
+            "failsafe_after": fake.FAILSAFE,
+        },
+    )
+
+    assert result.startswith("Successfully pressed combo:")
+    assert held == []
+    assert fake.FAILSAFE is True
+
+
+def test_press_combo_stuck_key_recovery() -> None:
+    from tools.tools import press_combo
+
+    fake = types.ModuleType("pyautogui")
+    held: list[str] = []
+    key_up_calls: dict[str, int] = {}
+    fake.FAILSAFE = True
+
+    def _key_down(key: str) -> None:
+        held.append(key)
+
+    def _key_up(key: str) -> None:
+        key_up_calls[key] = key_up_calls.get(key, 0) + 1
+        if key == "shift" and key_up_calls[key] == 1:
+            raise RuntimeError("temporary release failure")
+        if key in held:
+            held.remove(key)
+
+    fake.keyDown = _key_down
+    fake.keyUp = _key_up
+
+    original = sys.modules.get("pyautogui")
+    sys.modules["pyautogui"] = fake
+    try:
+        result = press_combo("shift")
+    finally:
+        if original is None:
+            del sys.modules["pyautogui"]
+        else:
+            sys.modules["pyautogui"] = original
+
+    _print_block(
+        "press_combo.stuck_key_recovery",
+        {
+            "result": result,
+            "held_after": held,
+            "key_up_calls": key_up_calls,
+        },
+    )
+
+    assert result.startswith("Successfully pressed combo:")
+    assert held == []
+    assert key_up_calls.get("shift", 0) >= 2
 
 
 def test_init() -> None:

@@ -53,6 +53,8 @@ Provider classes should only implement provider-specific parts:
 
 Rule: if behavior is identical across providers, it belongs in base.
 Rule: provider-specific callable-tool declaration building belongs in model-client code, not in CLI entrypoints.
+Rule: when adding a provider, wire the full path together in one change (model constants, setup selection, API-key source, runtime client factory, and response/tool-call parsing) to avoid partial support.
+Rule: provider response parsing (text/tool-call extraction and args decoding) belongs in provider model clients, not in generic CLI utils.
 
 ### History Model
 History should stay easy to inspect and manipulate.
@@ -81,6 +83,7 @@ Current preference:
 4. Keep tool interfaces simple and schema-friendly (clean signatures, clear types).
 5. Use one coordinate convention across pointer tools; currently both `move_mouse` and `click` use normalized `x, y` in `[0, 1]`.
 6. Keep an explicit `return_to_user` handoff tool so autonomous loops have a clear, inspectable stop condition.
+7. Any keyboard tool that calls key-down events must guarantee key-up cleanup inside the same tool call, including failure/retry paths.
 
 ### Runtime Loop
 For interactive computer-use sessions:
@@ -88,6 +91,7 @@ For interactive computer-use sessions:
 2. Let the model continue autonomously after tool results until it calls `return_to_user`.
 3. Keep provider/model/tool selection steps explicit in the CLI for teachability.
 4. Use a single explicit config path (`.tinyagent.config.json` in working directory) instead of path-discovery/fallback chains.
+4a. Use a single shared secret file (`.secret`) for provider API keys, keyed by env var name.
 5. On first run (no config), prompt explicitly for provider/model/tools/tool strategy and persist them; do not silently pick runtime defaults.
 6. Prefer arrow-key interactive pickers (and checkbox-style multi-select for tools) when running in a real TTY, with text prompts as fallback.
 7. Keep a runtime command to re-run setup and persist new config without restarting the process.
@@ -150,6 +154,7 @@ Maintenance rule:
 Model listing preference:
 1. Keep a local constant catalog of common model IDs per provider for predictable CLI defaults.
 2. Treat live model listing as optional runtime discovery, not the only source of model choices.
+3. Avoid separate default-model constants when setup/config already requires explicit model selection.
 
 ## Near-Term Focus Areas
 1. Simplify `tools/` exception strategy so failures are visible and educational.

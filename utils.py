@@ -138,51 +138,6 @@ def ask_tool_approval(prompt: str, *, default: ToolApproval = "deny") -> ToolApp
         print_warning("Please answer y, n, or a.")
 
 
-def extract_function_calls(response: Any) -> list[Any]:
-    direct_calls = getattr(response, "function_calls", None) or []
-    if direct_calls:
-        return list(direct_calls)
-
-    extracted: list[Any] = []
-    candidates = getattr(response, "candidates", None) or []
-    for candidate in candidates:
-        content = getattr(candidate, "content", None)
-        parts = getattr(content, "parts", None) or []
-        for part in parts:
-            function_call = getattr(part, "function_call", None)
-            if function_call:
-                extracted.append(function_call)
-    return extracted
-
-
-def extract_response_text(response: Any) -> str:
-    lines: list[str] = []
-    candidates = getattr(response, "candidates", None) or []
-    for candidate in candidates:
-        content = getattr(candidate, "content", None)
-        parts = getattr(content, "parts", None) or []
-        for part in parts:
-            text = getattr(part, "text", None)
-            if text:
-                lines.append(text)
-    return "\n".join(lines).strip()
-
-
-def args_to_dict(args: Any) -> dict[str, Any]:
-    if args is None:
-        return {}
-    if isinstance(args, dict):
-        return args
-    if hasattr(args, "fields"):
-        from google.protobuf.json_format import MessageToDict
-
-        return MessageToDict(args)
-    try:
-        return dict(args)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Unsupported function args payload: {args!r}") from exc
-
-
 def run_tool(tool_fn: ToolFn, args: dict[str, Any]) -> str:
     try:
         result = validate_and_call(tool_fn, args)
