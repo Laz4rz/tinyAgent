@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from api_key import load_api_key
+from debug_recorder import DebugRecorder
 from model_client import BaseModelClient, build_model_client
 from setup import (
     CONFIG_PATH,
@@ -27,6 +28,8 @@ from utils import (
     print_section,
     print_session_help,
     print_session_status,
+    print_model_waiting,
+    parse_main_cli_args,
     print_success,
     print_warning,
     run_tool,
@@ -70,6 +73,14 @@ class RuntimeSession:
     model: str
     agent_tools: list[ToolFn]
     auto_approve_tools: bool
+
+
+@dataclass(frozen=True)
+class DeferredToolResult:
+    name: str
+    call_id: str | None
+    result_text: str
+    use_next_user_message_as_result: bool = False
 
 
 def _provider_option(provider_key: str) -> ProviderOption:
@@ -129,34 +140,59 @@ def _run_agent_until_handoff(
     tool_functions: list[ToolFn],
     *,
     auto_approve_tools: bool = False,
-) -> None:
+    debug_recorder: DebugRecorder | None = None,
+) -> list[DeferredToolResult]:
     tool_map = {fn.__name__: fn for fn in tool_functions}
     allowed_function_names = list(tool_map.keys())
     missing_function_call_rounds = 0
 
     while True:
+        debug_turn: int | None = None
+        debug_screenshot_path: str | None = None
+        if debug_recorder is not None:
+            debug_turn = debug_recorder.next_turn()
+            debug_screenshot_path = debug_recorder.capture_screenshot(turn=debug_turn)
+
         request_config = client.tool_call_request_config(
             allowed_function_names=allowed_function_names,
         )
+        print_model_waiting()
         try:
             response = client.generate(
                 return_response=True,
                 store_response=False,
+                debug_recorder=debug_recorder,
+                debug_turn=debug_turn,
+                debug_screenshot_path=debug_screenshot_path,
                 **request_config,
             )
         except Exception as exc:
             print_error(f"[error] {exc}")
-            return
-
-        model_text = client.extract_response_text(response)
-        if model_text:
-            emit_message(client, role="model", text=model_text)
+            return []
 
         try:
             function_calls = client.extract_tool_calls(response)
         except ValueError as exc:
             emit_message(client, role="user", text=f"[protocol] invalid tool-call payload: {exc}")
             continue
+
+        thinking_summaries = client.extract_thinking_summaries(response)
+        model_text = client.extract_response_text(response)
+
+        for summary in thinking_summaries:
+            if summary.text:
+                print_role("model", f"[thinking-summary] {summary.text}")
+        if model_text:
+            print_role("model", model_text)
+        for tool_call in function_calls:
+            print_role("model", format_tool_request(tool_call.name, tool_call.args))
+
+        client.add_model_turn(
+            text=model_text,
+            thinking_summaries=thinking_summaries,
+            tool_calls=function_calls,
+        )
+
         if not function_calls:
             missing_function_call_rounds += 1
             if missing_function_call_rounds > 3:
@@ -180,15 +216,21 @@ def _run_agent_until_handoff(
         for tool_call in function_calls:
             name = tool_call.name
             args = tool_call.args
-            emit_message(client, role="model", text=format_tool_request(name, args))
 
             if name == return_to_user.__name__:
                 message = str(args.get("message", "")).strip()
                 if message and message != model_text:
-                    emit_message(client, role="model", text=message)
+                    print_role("model", message)
                 if not message and not model_text:
                     print_role("model", "Returning control to user.")
-                return
+                return [
+                    DeferredToolResult(
+                        name=name,
+                        call_id=tool_call.call_id,
+                        result_text="",
+                        use_next_user_message_as_result=True,
+                    )
+                ]
 
             tool_fn = tool_map.get(name)
             aborted_by_user = False
@@ -211,16 +253,60 @@ def _run_agent_until_handoff(
                         "The user will provide another instruction."
                     )
 
-            tagged_result = f"[tool-response] {name} result: {tool_result}"
-            emit_message(client, role="user", text=tagged_result)
+            if not aborted_by_user:
+                tagged_result = f"[tool-response] {name} result: {tool_result}"
+                print_role("user", tagged_result)
+                client.add_tool_result(
+                    name=name,
+                    result=tool_result,
+                    call_id=tool_call.call_id,
+                    role="user",
+                )
 
             if aborted_by_user:
                 print_role("user", "[control] Execution paused. Waiting for user instruction.")
-                return
+                return [
+                    DeferredToolResult(
+                        name=name,
+                        call_id=tool_call.call_id,
+                        result_text=tool_result,
+                        use_next_user_message_as_result=False,
+                    )
+                ]
+
+
+def _apply_deferred_tool_results(
+    client: BaseModelClient,
+    deferred_results: list[DeferredToolResult],
+    *,
+    next_user_message: str,
+) -> bool:
+    consumed_next_user_message = False
+    for deferred in deferred_results:
+        if deferred.use_next_user_message_as_result:
+            result_text = next_user_message
+            consumed_next_user_message = True
+        else:
+            result_text = deferred.result_text
+        tagged_result = f"[tool-response] {deferred.name} result: {result_text}"
+        print_role("user", tagged_result)
+        client.add_tool_result(
+            name=deferred.name,
+            result=result_text,
+            call_id=deferred.call_id,
+            role="user",
+        )
+    return consumed_next_user_message
 
 
 def main() -> None:
     init_output_style()
+    cli_args = parse_main_cli_args(sys.argv[1:])
+    debug_recorder: DebugRecorder | None = None
+    if cli_args.debug:
+        debug_recorder = DebugRecorder()
+        print_info(f"Debug mode enabled. Writing artifacts to: {debug_recorder.run_dir}")
+
     config_file = config_path(CONFIG_PATH)
     resolved_config = ensure_session_config(
         config_file=config_file,
@@ -232,6 +318,7 @@ def main() -> None:
 
     api_key = _load_provider_api_key(resolved_config.provider)
     runtime = _build_runtime_session(api_key, resolved_config)
+    deferred_tool_results: list[DeferredToolResult] = []
 
     print_section("Session Ready")
     print_session_status(
@@ -262,6 +349,7 @@ def main() -> None:
                 runtime.client.close()
                 api_key = _load_provider_api_key(new_config.provider)
                 runtime = _build_runtime_session(api_key, new_config)
+                deferred_tool_results = []
                 print_section("Session Reconfigured")
                 print_session_status(
                     provider_label=runtime.provider.label,
@@ -272,6 +360,7 @@ def main() -> None:
                 continue
             if user_input in CLEAN_COMMANDS:
                 runtime.client.clear_history()
+                deferred_tool_results = []
                 print_success("Conversation history cleared.")
                 continue
             if user_input == "/status":
@@ -293,11 +382,28 @@ def main() -> None:
             if not user_input:
                 continue
 
+            if deferred_tool_results:
+                consumed_user_input = _apply_deferred_tool_results(
+                    runtime.client,
+                    deferred_tool_results,
+                    next_user_message=user_input,
+                )
+                deferred_tool_results = []
+                if consumed_user_input:
+                    deferred_tool_results = _run_agent_until_handoff(
+                        runtime.client,
+                        runtime.agent_tools,
+                        auto_approve_tools=runtime.auto_approve_tools,
+                        debug_recorder=debug_recorder,
+                    )
+                    continue
+
             runtime.client.add_text(user_input, role="user")
-            _run_agent_until_handoff(
+            deferred_tool_results = _run_agent_until_handoff(
                 runtime.client,
                 runtime.agent_tools,
                 auto_approve_tools=runtime.auto_approve_tools,
+                debug_recorder=debug_recorder,
             )
     finally:
         runtime.client.close()

@@ -7,9 +7,12 @@ import mimetypes
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Literal
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Literal
 
 from tool_schema import make_tool_schema
+
+if TYPE_CHECKING:
+    from debug_recorder import DebugRecorder
 
 
 Role = Literal["user", "model", "tool", "system"]
@@ -33,10 +36,17 @@ class ImageSettings:
 
 @dataclass
 class MessagePart:
-    kind: Literal["text", "image"]
+    kind: Literal["text", "image", "thinking_summary", "tool_call", "tool_result"]
     text: str | None = None
     data: bytes | None = None
     mime_type: str | None = None
+    tool_name: str | None = None
+    tool_args: dict[str, Any] | None = None
+    tool_call_id: str | None = None
+    tool_output: str | None = None
+    item_id: str | None = None
+    thought_signature: bytes | None = None
+    encrypted_content: str | None = None
 
 
 @dataclass
@@ -49,6 +59,16 @@ class Message:
 class ToolCall:
     name: str
     args: dict[str, Any]
+    call_id: str | None = None
+    thought_signature: bytes | None = None
+
+
+@dataclass(frozen=True)
+class ThinkingSummary:
+    text: str
+    item_id: str | None = None
+    thought_signature: bytes | None = None
+    encrypted_content: str | None = None
 
 
 @dataclass
@@ -72,6 +92,64 @@ class ConversationHistory:
 
     def add_image(self, data: bytes, mime_type: str, *, role: Role = "user") -> None:
         self.append(Message(role=role, parts=[MessagePart(kind="image", data=data, mime_type=mime_type)]))
+
+    def add_model_turn(
+        self,
+        *,
+        text: str,
+        thinking_summaries: list[ThinkingSummary],
+        tool_calls: list[ToolCall],
+    ) -> None:
+        parts: list[MessagePart] = []
+        for summary in thinking_summaries:
+            parts.append(
+                MessagePart(
+                    kind="thinking_summary",
+                    text=summary.text,
+                    item_id=summary.item_id,
+                    thought_signature=summary.thought_signature,
+                    encrypted_content=summary.encrypted_content,
+                )
+            )
+
+        if text:
+            parts.append(MessagePart(kind="text", text=text))
+
+        for tool_call in tool_calls:
+            parts.append(
+                MessagePart(
+                    kind="tool_call",
+                    tool_name=tool_call.name,
+                    tool_args=tool_call.args,
+                    tool_call_id=tool_call.call_id,
+                    thought_signature=tool_call.thought_signature,
+                )
+            )
+
+        if parts:
+            self.append(Message(role="model", parts=parts))
+
+    def add_tool_result(
+        self,
+        *,
+        name: str,
+        result: str,
+        call_id: str | None,
+        role: Role = "user",
+    ) -> None:
+        self.append(
+            Message(
+                role=role,
+                parts=[
+                    MessagePart(
+                        kind="tool_result",
+                        tool_name=name,
+                        tool_output=result,
+                        tool_call_id=call_id,
+                    )
+                ],
+            )
+        )
 
     def clear(self) -> None:
         self.messages.clear()
@@ -103,6 +181,39 @@ class ConversationHistory:
                     lines.append(f"     compression: {_compression_label(part.mime_type)}")
                     continue
 
+                if part.kind == "thinking_summary":
+                    if part.text is None:
+                        raise ValueError("Thinking-summary part is missing text.")
+                    lines.append(f"   - input {part_index} (thinking_summary)")
+                    if part.item_id:
+                        lines.append(f"     item_id: {part.item_id}")
+                    if part.encrypted_content:
+                        lines.append("     encrypted_content: present")
+                    lines.append(f"     content: {part.text}")
+                    continue
+
+                if part.kind == "tool_call":
+                    if part.tool_name is None or part.tool_args is None:
+                        raise ValueError("Tool-call part is missing name or args.")
+                    lines.append(f"   - input {part_index} (tool_call)")
+                    lines.append(f"     name: {part.tool_name}")
+                    if part.tool_call_id:
+                        lines.append(f"     call_id: {part.tool_call_id}")
+                    if part.thought_signature:
+                        lines.append("     thought_signature: present")
+                    lines.append(f"     args: {json.dumps(part.tool_args)}")
+                    continue
+
+                if part.kind == "tool_result":
+                    if part.tool_name is None or part.tool_output is None:
+                        raise ValueError("Tool-result part is missing name or output.")
+                    lines.append(f"   - input {part_index} (tool_result)")
+                    lines.append(f"     name: {part.tool_name}")
+                    if part.tool_call_id:
+                        lines.append(f"     call_id: {part.tool_call_id}")
+                    lines.append(f"     output: {part.tool_output}")
+                    continue
+
                 raise ValueError(f"Unsupported message part kind: {part.kind}")
 
         return "\n".join(lines)
@@ -123,6 +234,34 @@ class BaseModelClient(ABC):
 
     def add_text(self, text: str, *, role: Role = "user") -> None:
         self.history.add_text(text, role=role)
+
+    def add_model_turn(
+        self,
+        *,
+        text: str,
+        thinking_summaries: list[ThinkingSummary],
+        tool_calls: list[ToolCall],
+    ) -> None:
+        self.history.add_model_turn(
+            text=text,
+            thinking_summaries=thinking_summaries,
+            tool_calls=tool_calls,
+        )
+
+    def add_tool_result(
+        self,
+        *,
+        name: str,
+        result: str,
+        call_id: str | None,
+        role: Role = "user",
+    ) -> None:
+        self.history.add_tool_result(
+            name=name,
+            result=result,
+            call_id=call_id,
+            role=role,
+        )
 
     def add_image(
         self,
@@ -173,16 +312,35 @@ class BaseModelClient(ABC):
     def extract_tool_calls(self, response: Any) -> list[ToolCall]:
         return self._extract_tool_calls(response)
 
+    def extract_thinking_summaries(self, response: Any) -> list[ThinkingSummary]:
+        return self._extract_thinking_summaries(response)
+
     def generate(
         self,
         *,
         store_response: bool = True,
         return_response: bool = False,
+        debug_recorder: DebugRecorder | None = None,
+        debug_turn: int | None = None,
+        debug_screenshot_path: str | None = None,
         **config_kwargs: Any,
     ) -> Any:
         request_config = self._build_request_config(config_kwargs)
         encoded_history = self._encode_history()
+        if debug_recorder is not None:
+            if debug_turn is None:
+                raise ValueError("debug_turn is required when debug_recorder is provided.")
+            debug_recorder.record_request(
+                turn=debug_turn,
+                provider=self.__class__.__name__.removesuffix("Client").lower(),
+                model=self.model,
+                encoded_history=encoded_history,
+                request_config=request_config,
+                screenshot_path=debug_screenshot_path,
+            )
         response = self._call_model(encoded_history=encoded_history, request_config=request_config)
+        if debug_recorder is not None:
+            debug_recorder.record_response(turn=debug_turn, response=response)
 
         if return_response and not store_response:
             return response
@@ -225,6 +383,9 @@ class BaseModelClient(ABC):
     def _extract_tool_calls(self, response: Any) -> list[ToolCall]:
         raise NotImplementedError
 
+    def _extract_thinking_summaries(self, response: Any) -> list[ThinkingSummary]:
+        return []
+
     def _build_provider_tools(self, tool_functions: Iterable[Callable[..., Any]]) -> list[Any]:
         raise NotImplementedError(
             f"{self.__class__.__name__} does not implement callable tool conversion."
@@ -259,6 +420,8 @@ class GeminiClient(BaseModelClient):
             merged["system_instruction"] = self.system_prompt
         if self.tools and "tools" not in merged:
             merged["tools"] = self.tools
+        if "thinking_config" not in merged:
+            merged["thinking_config"] = types.ThinkingConfig(include_thoughts=True)
 
         if not merged:
             return None
@@ -281,6 +444,38 @@ class GeminiClient(BaseModelClient):
                         raise ValueError("Image message part is missing data or mime_type.")
                     parts.append(types.Part.from_bytes(data=part.data, mime_type=part.mime_type))
                     continue
+                if part.kind == "thinking_summary":
+                    if part.text is None:
+                        raise ValueError("Thinking-summary part is missing text.")
+                    parts.append(
+                        types.Part(
+                            text=part.text,
+                            thought=True,
+                            thought_signature=part.thought_signature,
+                        )
+                    )
+                    continue
+                if part.kind == "tool_call":
+                    if part.tool_name is None or part.tool_args is None:
+                        raise ValueError("Tool-call part is missing name or args.")
+                    function_call_part = types.Part.from_function_call(
+                        name=part.tool_name,
+                        args=part.tool_args,
+                    )
+                    if part.thought_signature is not None:
+                        function_call_part.thought_signature = part.thought_signature
+                    parts.append(function_call_part)
+                    continue
+                if part.kind == "tool_result":
+                    if part.tool_name is None or part.tool_output is None:
+                        raise ValueError("Tool-result part is missing name or output.")
+                    parts.append(
+                        types.Part.from_function_response(
+                            name=part.tool_name,
+                            response={"result": part.tool_output},
+                        )
+                    )
+                    continue
                 raise ValueError(f"Unsupported message part kind: {part.kind}")
             contents.append(types.Content(role=_gemini_role(message.role), parts=parts))
         return contents
@@ -299,7 +494,7 @@ class GeminiClient(BaseModelClient):
         for candidate in response.candidates or []:
             for part in candidate.content.parts or []:
                 text = part.text
-                if text:
+                if text and not part.thought:
                     lines.append(text)
         return "\n".join(lines).strip()
 
@@ -317,9 +512,23 @@ class GeminiClient(BaseModelClient):
                     ToolCall(
                         name=name,
                         args=_normalize_tool_args(function_call.args),
+                        thought_signature=part.thought_signature,
                     )
                 )
         return calls
+
+    def _extract_thinking_summaries(self, response: Any) -> list[ThinkingSummary]:
+        summaries: list[ThinkingSummary] = []
+        for candidate in response.candidates or []:
+            for part in candidate.content.parts or []:
+                if part.thought and (part.text or part.thought_signature):
+                    summaries.append(
+                        ThinkingSummary(
+                            text=part.text or "",
+                            thought_signature=part.thought_signature,
+                        )
+                    )
+        return summaries
 
     def _build_provider_tools(self, tool_functions: Iterable[Callable[..., Any]]) -> list[Any]:
         from google.genai import types
@@ -372,25 +581,53 @@ class OpenAIClient(BaseModelClient):
 
     def _build_request_config(self, config_kwargs: dict[str, Any]) -> dict[str, Any]:
         merged = dict(config_kwargs)
+        if self.system_prompt is not None and "instructions" not in merged:
+            merged["instructions"] = self.system_prompt
         if self.tools and "tools" not in merged:
             merged["tools"] = self.tools
+        if "store" not in merged:
+            merged["store"] = False
+        if "reasoning" not in merged:
+            merged["reasoning"] = {"summary": "detailed"}
+        include_items = merged.get("include")
+        if include_items is None:
+            normalized_include: list[str] = []
+        elif isinstance(include_items, list):
+            normalized_include = [str(item) for item in include_items]
+        else:
+            raise ValueError("OpenAI request config `include` must be a list of strings.")
+        if "reasoning.encrypted_content" not in normalized_include:
+            normalized_include.append("reasoning.encrypted_content")
+        merged["include"] = normalized_include
         return merged
 
     def _encode_history(self) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = []
-        if self.system_prompt is not None:
-            messages.append({"role": "system", "content": self.system_prompt})
-
-        for message in self.history:
+        items: list[dict[str, Any]] = []
+        for message_index, message in enumerate(self.history, start=1):
             if not message.parts:
                 continue
 
-            content_items: list[dict[str, Any]] = []
-            for part in message.parts:
+            role = _openai_role(message.role)
+            buffered_content: list[dict[str, Any]] = []
+
+            def flush_buffered_message() -> None:
+                nonlocal buffered_content
+                if not buffered_content:
+                    return
+
+                if len(buffered_content) == 1 and buffered_content[0]["type"] == "input_text":
+                    content: str | list[dict[str, Any]] = buffered_content[0]["text"]
+                else:
+                    content = list(buffered_content)
+
+                items.append({"type": "message", "role": role, "content": content})
+                buffered_content = []
+
+            for part_index, part in enumerate(message.parts, start=1):
                 if part.kind == "text":
                     if part.text is None:
                         raise ValueError("Text message part is missing text.")
-                    content_items.append({"type": "text", "text": part.text})
+                    buffered_content.append({"type": "input_text", "text": part.text})
                     continue
 
                 if part.kind == "image":
@@ -398,77 +635,165 @@ class OpenAIClient(BaseModelClient):
                         raise ValueError("Image message part is missing data or mime_type.")
                     encoded = base64.b64encode(part.data).decode("ascii")
                     data_url = f"data:{part.mime_type};base64,{encoded}"
-                    content_items.append({"type": "image_url", "image_url": {"url": data_url}})
+                    buffered_content.append({"type": "input_image", "image_url": data_url})
+                    continue
+
+                flush_buffered_message()
+
+                if part.kind == "thinking_summary":
+                    reasoning_item: dict[str, Any] = {"type": "reasoning"}
+
+                    if part.encrypted_content is not None:
+                        reasoning_item["encrypted_content"] = part.encrypted_content
+
+                    if part.text:
+                        reasoning_item["summary"] = [
+                            {
+                                "type": "summary_text",
+                                "text": part.text,
+                            }
+                        ]
+                    else:
+                        reasoning_item["summary"] = []
+
+                    items.append(reasoning_item)
+                    continue
+
+                if part.kind == "tool_call":
+                    if part.tool_name is None or part.tool_args is None:
+                        raise ValueError("Tool-call part is missing name or args.")
+                    call_id = part.tool_call_id or f"call_{message_index}_{part_index}"
+                    items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": part.tool_name,
+                            "arguments": json.dumps(part.tool_args),
+                        }
+                    )
+                    continue
+
+                if part.kind == "tool_result":
+                    if part.tool_output is None:
+                        raise ValueError("Tool-result part is missing output.")
+                    call_id = part.tool_call_id or f"call_{message_index}_{part_index}"
+                    items.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": part.tool_output,
+                        }
+                    )
                     continue
 
                 raise ValueError(f"Unsupported message part kind: {part.kind}")
 
-            if len(content_items) == 1 and content_items[0]["type"] == "text":
-                content: str | list[dict[str, Any]] = content_items[0]["text"]
-            else:
-                content = content_items
+            flush_buffered_message()
 
-            messages.append({"role": _openai_role(message.role), "content": content})
-
-        return messages
+        return items
 
     def _call_model(self, *, encoded_history: list[dict[str, Any]], request_config: dict[str, Any]) -> Any:
-        return self._client.chat.completions.create(
+        return self._client.responses.create(
             model=self.model,
-            messages=encoded_history,
+            input=encoded_history,
             **request_config,
         )
 
     def _extract_text(self, response: Any) -> str:
+        try:
+            output_text = response.output_text
+        except AttributeError:
+            output_text = None
+        if output_text:
+            return str(output_text).strip()
+
+        try:
+            output_items = response.output
+        except AttributeError:
+            output_items = None
+        if output_items is None:
+            return _extract_openai_chat_completion_text(response)
+
         lines: list[str] = []
-        for choice in response.choices or []:
-            message = choice.message
-            if message is None:
+        for item in output_items or []:
+            item_type = item["type"] if isinstance(item, dict) else item.type
+            if item_type != "message":
                 continue
 
-            content = message.content
-            if isinstance(content, str):
-                if content:
-                    lines.append(content)
-                continue
-
-            if content is None:
-                continue
-
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict):
-                        text = item.get("text")
-                    else:
-                        text = item.text
-                    if text:
-                        lines.append(text)
-                continue
-
-            raise ValueError(f"Unsupported OpenAI message content payload: {content!r}")
-
+            content = item["content"] if isinstance(item, dict) else item.content
+            for part in content or []:
+                part_type = part["type"] if isinstance(part, dict) else part.type
+                if part_type != "output_text":
+                    continue
+                text = part["text"] if isinstance(part, dict) else part.text
+                if text:
+                    lines.append(text)
         return "\n".join(lines).strip()
 
     def _extract_tool_calls(self, response: Any) -> list[ToolCall]:
+        try:
+            output_items = response.output
+        except AttributeError:
+            output_items = None
+        if output_items is None:
+            return _extract_openai_chat_completion_tool_calls(response)
+
         calls: list[ToolCall] = []
-        for choice in response.choices or []:
-            message = choice.message
-            if message is None:
+        for item in output_items or []:
+            item_type = item["type"] if isinstance(item, dict) else item.type
+            if item_type != "function_call":
                 continue
-            for tool_call in message.tool_calls or []:
-                function = tool_call.function
-                if function is None:
-                    raise ValueError("OpenAI tool call is missing `function`.")
-                name = function.name
-                if not name:
-                    raise ValueError("OpenAI tool call is missing function name.")
-                calls.append(
-                    ToolCall(
-                        name=name,
-                        args=_parse_openai_tool_arguments(function.arguments),
-                    )
+
+            name = item["name"] if isinstance(item, dict) else item.name
+            if not name:
+                raise ValueError("OpenAI function call is missing function name.")
+            raw_arguments = item["arguments"] if isinstance(item, dict) else item.arguments
+            call_id = item["call_id"] if isinstance(item, dict) else item.call_id
+            calls.append(
+                ToolCall(
+                    name=name,
+                    args=_parse_openai_tool_arguments(raw_arguments),
+                    call_id=call_id,
                 )
+            )
         return calls
+
+    def _extract_thinking_summaries(self, response: Any) -> list[ThinkingSummary]:
+        try:
+            output_items = response.output
+        except AttributeError:
+            return []
+
+        summaries: list[ThinkingSummary] = []
+        for item in output_items or []:
+            item_type = item["type"] if isinstance(item, dict) else item.type
+            if item_type != "reasoning":
+                continue
+            item_id = item.get("id") if isinstance(item, dict) else item.id
+            encrypted_content = (
+                item.get("encrypted_content")
+                if isinstance(item, dict)
+                else item.encrypted_content
+            )
+            summary_parts = item["summary"] if isinstance(item, dict) else item.summary
+            summary_texts: list[str] = []
+            for part in summary_parts or []:
+                part_type = part["type"] if isinstance(part, dict) else part.type
+                if part_type != "summary_text":
+                    continue
+                text = part["text"] if isinstance(part, dict) else part.text
+                if text:
+                    summary_texts.append(text)
+            if not summary_texts and encrypted_content is None:
+                continue
+            summaries.append(
+                ThinkingSummary(
+                    text="\n".join(summary_texts).strip(),
+                    item_id=item_id,
+                    encrypted_content=encrypted_content,
+                )
+            )
+        return summaries
 
     def _build_provider_tools(self, tool_functions: Iterable[Callable[..., Any]]) -> list[Any]:
         declarations: list[dict[str, Any]] = []
@@ -477,11 +802,9 @@ class OpenAIClient(BaseModelClient):
             declarations.append(
                 {
                     "type": "function",
-                    "function": {
-                        "name": schema["name"],
-                        "description": schema["description"],
-                        "parameters": schema["parameters"],
-                    },
+                    "name": schema["name"],
+                    "description": schema["description"],
+                    "parameters": schema["parameters"],
                 }
             )
         return declarations
@@ -492,7 +815,7 @@ class OpenAIClient(BaseModelClient):
             return {
                 "tool_choice": {
                     "type": "function",
-                    "function": {"name": names[0]},
+                    "name": names[0],
                 }
             }
         return {"tool_choice": "required"}
@@ -551,13 +874,69 @@ def _normalize_tool_args(args: Any) -> dict[str, Any]:
     return payload
 
 
-def _parse_openai_tool_arguments(arguments: str | None) -> dict[str, Any]:
+def _parse_openai_tool_arguments(arguments: Any) -> dict[str, Any]:
     if arguments is None or arguments == "":
         return {}
+    if isinstance(arguments, dict):
+        return arguments
     payload = json.loads(arguments)
     if not isinstance(payload, dict):
         raise ValueError("OpenAI function arguments must decode to a JSON object.")
     return payload
+
+
+def _extract_openai_chat_completion_text(response: Any) -> str:
+    lines: list[str] = []
+    for choice in response.choices or []:
+        message = choice.message
+        if message is None:
+            continue
+
+        content = message.content
+        if isinstance(content, str):
+            if content:
+                lines.append(content)
+            continue
+
+        if content is None:
+            continue
+
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                else:
+                    text = item.text
+                if text:
+                    lines.append(text)
+            continue
+
+        raise ValueError(f"Unsupported OpenAI message content payload: {content!r}")
+
+    return "\n".join(lines).strip()
+
+
+def _extract_openai_chat_completion_tool_calls(response: Any) -> list[ToolCall]:
+    calls: list[ToolCall] = []
+    for choice in response.choices or []:
+        message = choice.message
+        if message is None:
+            continue
+        for tool_call in message.tool_calls or []:
+            function = tool_call.function
+            if function is None:
+                raise ValueError("OpenAI tool call is missing `function`.")
+            name = function.name
+            if not name:
+                raise ValueError("OpenAI tool call is missing function name.")
+            calls.append(
+                ToolCall(
+                    name=name,
+                    args=_parse_openai_tool_arguments(function.arguments),
+                    call_id=None,
+                )
+            )
+    return calls
 
 
 def _guess_mime_type(path: Path) -> str:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from dataclasses import dataclass
 from typing import Any, Callable, Literal, Protocol
 
 from tool_schema import validate_and_call
@@ -11,6 +12,11 @@ from tool_schema import validate_and_call
 ToolFn = Callable[..., Any]
 ToolApproval = Literal["approve", "deny", "abort"]
 RoleName = Literal["user", "model"]
+
+
+@dataclass(frozen=True)
+class MainCliArgs:
+    debug: bool
 
 
 class TextSink(Protocol):
@@ -92,6 +98,10 @@ def print_error(text: str) -> None:
     print(_style(text, STYLE_ERROR))
 
 
+def print_model_waiting() -> None:
+    print_role("model", "[status] waiting for response...")
+
+
 def user_prompt() -> str:
     return f"\n{role_label('user')} "
 
@@ -148,3 +158,13 @@ def run_tool(tool_fn: ToolFn, args: dict[str, Any]) -> str:
 
 def format_tool_request(name: str, args: dict[str, Any]) -> str:
     return f"[tool-request] {name} {json.dumps(args)}"
+
+
+def parse_main_cli_args(argv: list[str]) -> MainCliArgs:
+    debug = False
+    for token in argv:
+        if token == "--debug":
+            debug = True
+            continue
+        raise ValueError(f"Unknown argument: {token}. Supported args: --debug")
+    return MainCliArgs(debug=debug)

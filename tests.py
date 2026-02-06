@@ -94,6 +94,7 @@ def _args_to_dict(args) -> dict:
 
 def _all_tests() -> list[tuple[str, Any]]:
     return [
+        ("main_cli_args_debug", test_main_cli_args_debug),
         ("main_provider_options", test_main_provider_options),
         ("main_reconfigure_command", test_main_reconfigure_command),
         ("main_clean_command", test_main_clean_command),
@@ -101,7 +102,14 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("main_api_error_handling", test_main_api_error_handling),
         ("main_tool_request_history", test_main_tool_request_history),
         ("main_tool_request_history_openai_shape", test_main_tool_request_history_openai_shape),
+        ("main_deferred_tool_result_return_to_user", test_main_deferred_tool_result_return_to_user),
+        ("main_deferred_tool_result_abort", test_main_deferred_tool_result_abort),
         ("utils_emit_message", test_utils_emit_message),
+        ("model_client_debug_recording", test_model_client_debug_recording),
+        ("model_client_openai_request_config_stateless", test_model_client_openai_request_config_stateless),
+        ("model_client_openai_history_encoding_structured", test_model_client_openai_history_encoding_structured),
+        ("model_client_openai_history_replays_reasoning_items", test_model_client_openai_history_replays_reasoning_items),
+        ("model_client_extract_gemini_thinking", test_model_client_extract_gemini_thinking),
         ("model_client_extract_openai_response", test_model_client_extract_openai_response),
         ("api_key_shared_secret", test_api_key_shared_secret),
         ("session_config_fixed_path", test_session_config_fixed_path),
@@ -109,6 +117,7 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("known_models_constants", test_known_models_constants),
         ("main_tool_selection_parse", test_main_tool_selection_parse),
         ("history_object", test_history_object),
+        ("history_model_turn_preserves_tool_call_signature", test_history_model_turn_preserves_tool_call_signature),
         ("history_visualization_text_and_image", test_history_visualization_text_and_image),
         ("return_to_user_tool", test_return_to_user_tool),
         ("image_auto_downsize_default", test_image_auto_downsize_default),
@@ -249,6 +258,41 @@ def test_history_object() -> None:
     assert len(client.history) == 2
     assert client.history[0].parts[0].text == "hello"
     assert snapshot[1].role == "model"
+
+
+def test_history_model_turn_preserves_tool_call_signature() -> None:
+    from model_client import ConversationHistory, ThinkingSummary
+
+    history = ConversationHistory()
+    history.add_model_turn(
+        text="",
+        thinking_summaries=[ThinkingSummary(text="", thought_signature=b"sig_thought")],
+        tool_calls=[
+            ToolCall(
+                name="click",
+                args={"x": 0.25, "y": 0.75},
+                thought_signature=b"sig_function_call",
+            )
+        ],
+    )
+
+    rendered = history.render(color=False)
+
+    _print_block(
+        "history.model_turn_preserves_tool_call_signature",
+        {
+            "part_kinds": [part.kind for part in history[0].parts],
+            "thought_signature_present": history[0].parts[0].thought_signature is not None,
+            "tool_call_signature_present": history[0].parts[1].thought_signature is not None,
+            "rendered": rendered,
+        },
+    )
+
+    assert len(history) == 1
+    assert [part.kind for part in history[0].parts] == ["thinking_summary", "tool_call"]
+    assert history[0].parts[0].thought_signature == b"sig_thought"
+    assert history[0].parts[1].thought_signature == b"sig_function_call"
+    assert "thought_signature: present" in rendered
 
 
 def test_known_models_constants() -> None:
@@ -449,49 +493,161 @@ def test_utils_emit_message() -> None:
     assert client.history[-1].parts[0].text == "[protocol] test-message"
 
 
+def test_model_client_openai_history_encoding_structured() -> None:
+    from model_client import ConversationHistory, OpenAIClient, ThinkingSummary, ToolCall
+
+    client = object.__new__(OpenAIClient)
+    client.history = ConversationHistory()
+    client.model = "gpt-5-mini"
+    client.system_prompt = "system-prompt"
+    client.tools = []
+
+    client.add_text("hey who are you", role="user")
+    client.add_model_turn(
+        text="",
+        thinking_summaries=[ThinkingSummary(text="plan", item_id="rs_test")],
+        tool_calls=[ToolCall(name="return_to_user", args={"message": "hi"}, call_id="call_test")],
+    )
+    client.add_tool_result(
+        name="return_to_user",
+        result='{"message":"hi"}',
+        call_id="call_test",
+        role="user",
+    )
+    client.add_text("yo", role="user")
+
+    encoded = client._encode_history()
+    _print_block("model_client.openai_history_encoding_structured", {"encoded": encoded})
+
+    assert encoded[0] == {"type": "message", "role": "user", "content": "hey who are you"}
+    assert encoded[1] == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "plan"}],
+    }
+    assert encoded[2] == {
+        "type": "function_call",
+        "call_id": "call_test",
+        "name": "return_to_user",
+        "arguments": '{"message": "hi"}',
+    }
+    assert encoded[3] == {
+        "type": "function_call_output",
+        "call_id": "call_test",
+        "output": '{"message":"hi"}',
+    }
+    assert encoded[4] == {"type": "message", "role": "user", "content": "yo"}
+
+
+def test_model_client_openai_request_config_stateless() -> None:
+    from model_client import OpenAIClient
+
+    client = object.__new__(OpenAIClient)
+    client.system_prompt = "sys"
+    client.tools = [{"type": "function", "name": "noop"}]
+
+    config = client._build_request_config({})
+
+    _print_block("model_client.openai_request_config_stateless", {"config": config})
+
+    assert config["instructions"] == "sys"
+    assert config["tools"] == [{"type": "function", "name": "noop"}]
+    assert config["store"] is False
+    assert config["reasoning"] == {"summary": "detailed"}
+    assert "reasoning.encrypted_content" in config["include"]
+
+
+def test_model_client_openai_history_replays_reasoning_items() -> None:
+    from model_client import ConversationHistory, OpenAIClient, ThinkingSummary
+
+    client = object.__new__(OpenAIClient)
+    client.history = ConversationHistory()
+    client.model = "gpt-5-mini"
+    client.system_prompt = "system-prompt"
+    client.tools = []
+
+    client.add_text("hello", role="user")
+    client.add_model_turn(
+        text="",
+        thinking_summaries=[
+            ThinkingSummary(text="part one", item_id="rs_1"),
+            ThinkingSummary(text="", item_id="rs_2", encrypted_content="enc_abc"),
+        ],
+        tool_calls=[],
+    )
+    client.add_text("next", role="user")
+
+    encoded = client._encode_history()
+    reasoning_items = [item for item in encoded if item["type"] == "reasoning"]
+
+    _print_block(
+        "model_client.openai_history_replays_reasoning_items",
+        {
+            "encoded": encoded,
+            "reasoning_count": len(reasoning_items),
+        },
+    )
+
+    assert len(reasoning_items) == 2
+    assert reasoning_items[0] == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "part one"}],
+    }
+    assert reasoning_items[1] == {
+        "type": "reasoning",
+        "encrypted_content": "enc_abc",
+        "summary": [],
+    }
+
+
 def test_model_client_extract_openai_response() -> None:
     from model_client import OpenAIClient
 
-    class _Function:
-        def __init__(self, name: str, arguments: str) -> None:
-            self.name = name
-            self.arguments = arguments
+    class _SummaryPart:
+        def __init__(self, text: str) -> None:
+            self.type = "summary_text"
+            self.text = text
 
-    class _ToolCall:
-        def __init__(self, function: _Function) -> None:
-            self.function = function
+    class _Reasoning:
+        def __init__(self, summary_text: str, item_id: str) -> None:
+            self.type = "reasoning"
+            self.id = item_id
+            self.summary = [_SummaryPart(summary_text)]
+
+    class _OutputTextPart:
+        def __init__(self, text: str) -> None:
+            self.type = "output_text"
+            self.text = text
 
     class _Message:
-        def __init__(self, content: str, tool_calls: list[_ToolCall]) -> None:
-            self.content = content
-            self.tool_calls = tool_calls
+        def __init__(self, text: str) -> None:
+            self.type = "message"
+            self.content = [_OutputTextPart(text)]
 
-    class _Choice:
-        def __init__(self, message: _Message) -> None:
-            self.message = message
+    class _FunctionCall:
+        def __init__(self, name: str, arguments: str, call_id: str) -> None:
+            self.type = "function_call"
+            self.name = name
+            self.arguments = arguments
+            self.call_id = call_id
 
     class _Response:
-        def __init__(self, choices: list[_Choice]) -> None:
-            self.choices = choices
+        def __init__(self) -> None:
+            self.output_text = "openai-response"
+            self.output = [
+                _Reasoning("Plan: click target from bounding-box estimate.", "rs_test"),
+                _Message("openai-response"),
+                _FunctionCall("click", '{"x": 0.1, "y": 0.9}', "call_abc"),
+            ]
 
     try:
         client = OpenAIClient(api_key="test-key", model="gpt-4.1-mini")
     except ModuleNotFoundError as exc:
         raise SkipTest("openai is required for OpenAI parsing tests") from exc
     try:
-        response = _Response(
-            [
-                _Choice(
-                    _Message(
-                        content="openai-response",
-                        tool_calls=[_ToolCall(_Function("click", '{"x": 0.1, "y": 0.9}'))],
-                    )
-                )
-            ]
-        )
-
+        response = _Response()
         text = client.extract_response_text(response)
         calls = client.extract_tool_calls(response)
+        summaries = client.extract_thinking_summaries(response)
 
         _print_block(
             "model_client.extract_openai_response",
@@ -499,6 +655,8 @@ def test_model_client_extract_openai_response() -> None:
                 "text": text,
                 "tool_name": calls[0].name,
                 "args": calls[0].args,
+                "call_id": calls[0].call_id,
+                "thinking_summary": summaries[0].text,
             },
         )
 
@@ -506,8 +664,159 @@ def test_model_client_extract_openai_response() -> None:
         assert len(calls) == 1
         assert calls[0].name == "click"
         assert calls[0].args == {"x": 0.1, "y": 0.9}
+        assert calls[0].call_id == "call_abc"
+        assert [summary.text for summary in summaries] == [
+            "Plan: click target from bounding-box estimate."
+        ]
     finally:
         client.close()
+
+
+def test_model_client_extract_gemini_thinking() -> None:
+    from model_client import GeminiClient
+
+    class _FunctionCall:
+        def __init__(self, name: str, args: dict[str, Any]) -> None:
+            self.name = name
+            self.args = args
+
+    class _Part:
+        def __init__(
+            self,
+            *,
+            text: str | None = None,
+            thought: bool = False,
+            thought_signature: bytes | None = None,
+            function_call: _FunctionCall | None = None,
+        ) -> None:
+            self.text = text
+            self.thought = thought
+            self.thought_signature = thought_signature
+            self.function_call = function_call
+
+    class _Content:
+        def __init__(self, parts: list[_Part]) -> None:
+            self.parts = parts
+
+    class _Candidate:
+        def __init__(self, parts: list[_Part]) -> None:
+            self.content = _Content(parts)
+
+    class _Response:
+        def __init__(self) -> None:
+            self.candidates = [
+                _Candidate(
+                    [
+                        _Part(text="Plan: estimate target by color region.", thought=True),
+                        _Part(text=None, thought=True, thought_signature=b"sig_thought_only"),
+                        _Part(text="Clicking target now.", thought=False),
+                        _Part(
+                            function_call=_FunctionCall("click", {"x": 0.4, "y": 0.6}),
+                            thought_signature=b"sig_fc",
+                        ),
+                    ]
+                )
+            ]
+
+    client = object.__new__(GeminiClient)
+    response = _Response()
+
+    text = client.extract_response_text(response)
+    calls = client.extract_tool_calls(response)
+    summaries = client.extract_thinking_summaries(response)
+
+    _print_block(
+        "model_client.extract_gemini_thinking",
+            {
+                "text": text,
+                "tool_name": calls[0].name,
+                "args": calls[0].args,
+                "tool_thought_signature": calls[0].thought_signature.decode("utf-8"),
+                "thinking_summaries": [summary.text for summary in summaries],
+            },
+        )
+
+    assert text == "Clicking target now."
+    assert len(calls) == 1
+    assert calls[0].name == "click"
+    assert calls[0].args == {"x": 0.4, "y": 0.6}
+    assert calls[0].thought_signature == b"sig_fc"
+    assert len(summaries) == 2
+    assert summaries[0].text == "Plan: estimate target by color region."
+    assert summaries[0].thought_signature is None
+    assert summaries[1].text == ""
+    assert summaries[1].thought_signature == b"sig_thought_only"
+
+
+def test_main_cli_args_debug() -> None:
+    from utils import parse_main_cli_args
+
+    no_flags = parse_main_cli_args([])
+    debug_flag = parse_main_cli_args(["--debug"])
+
+    _print_block(
+        "main.cli_args_debug",
+        {
+            "no_flags_debug": no_flags.debug,
+            "debug_flag_debug": debug_flag.debug,
+        },
+    )
+
+    assert no_flags.debug is False
+    assert debug_flag.debug is True
+
+    try:
+        parse_main_cli_args(["--nope"])
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Unknown flags should raise ValueError.")
+
+    assert "Unknown argument" in message
+    assert "--debug" in message
+
+
+def test_model_client_debug_recording() -> None:
+    from debug_recorder import DebugRecorder
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        recorder = DebugRecorder(root=tmp_dir)
+        client = _StubClient()
+        client.add_text("hello", role="user")
+
+        turn = recorder.next_turn()
+        response = client.generate(
+            return_response=True,
+            store_response=False,
+            debug_recorder=recorder,
+            debug_turn=turn,
+            debug_screenshot_path="debug/snap.png",
+        )
+
+        request_payloads = json.loads(recorder.request_log_path.read_text(encoding="utf-8"))
+        response_payloads = json.loads(recorder.response_log_path.read_text(encoding="utf-8"))
+        request_payload = request_payloads[0]
+        response_payload = response_payloads[0]
+
+        _print_block(
+            "model_client.debug_recording",
+            {
+                "request_turn": request_payload["turn"],
+                "request_screenshot_path": request_payload["screenshot_path"],
+                "response_turn": response_payload["turn"],
+                "response_keys": sorted(response_payload["response"].keys()),
+                "response_text": response["text"],
+            },
+        )
+
+        assert len(request_payloads) == 1
+        assert len(response_payloads) == 1
+        assert request_payload["turn"] == turn
+        assert request_payload["screenshot_path"] == "debug/snap.png"
+        assert request_payload["model"] == "stub-model"
+        assert request_payload["provider"] == "_stub"
+        assert response_payload["turn"] == turn
+        assert response_payload["response"] == {"text": "stub-response"}
 
 
 def test_main_tool_request_history() -> None:
@@ -526,7 +835,7 @@ def test_main_tool_request_history() -> None:
 
     class _FakeClient:
         def __init__(self) -> None:
-            self.history: list[tuple[str, str]] = []
+            self.history: list[dict[str, Any]] = []
 
         def tool_call_request_config(self, *, allowed_function_names: list[str]) -> dict[str, Any]:
             _ = allowed_function_names
@@ -540,30 +849,64 @@ def test_main_tool_request_history() -> None:
             _ = response
             return ""
 
+        def extract_thinking_summaries(self, response: _FakeResponse) -> list[str]:
+            _ = response
+            return []
+
         def extract_tool_calls(self, response: _FakeResponse) -> list[ToolCall]:
             call = response.function_calls[0]
             return [ToolCall(name=call.name, args=call.args)]
 
-        def add_text(self, text: str, *, role: str = "user") -> None:
-            self.history.append((role, text))
+        def add_model_turn(
+            self,
+            *,
+            text: str,
+            thinking_summaries: list[Any],
+            tool_calls: list[ToolCall],
+        ) -> None:
+            self.history.append(
+                {
+                    "kind": "model_turn",
+                    "text": text,
+                    "thinking_summaries": thinking_summaries,
+                    "tool_calls": tool_calls,
+                }
+            )
 
     fake_client = _FakeClient()
-    _run_agent_until_handoff(
+    deferred = _run_agent_until_handoff(
         fake_client,  # type: ignore[arg-type]
         [return_to_user],
         auto_approve_tools=False,
     )
 
+    serialized_history = [
+        {
+            **entry,
+            "tool_calls": [
+                {"name": call.name, "args": call.args, "call_id": call.call_id}
+                for call in entry["tool_calls"]
+            ],
+        }
+        for entry in fake_client.history
+    ]
     _print_block(
         "main.tool_request_history",
         {
-            "history": fake_client.history,
+            "history": serialized_history,
         },
     )
-    assert len(fake_client.history) == 2
-    assert fake_client.history[0][0] == "model"
-    assert fake_client.history[0][1].startswith("[tool-request] return_to_user")
-    assert fake_client.history[1] == ("model", "Done.")
+    assert len(fake_client.history) == 1
+    assert fake_client.history[0]["kind"] == "model_turn"
+    assert fake_client.history[0]["text"] == ""
+    assert fake_client.history[0]["thinking_summaries"] == []
+    assert len(fake_client.history[0]["tool_calls"]) == 1
+    assert fake_client.history[0]["tool_calls"][0].name == "return_to_user"
+    assert fake_client.history[0]["tool_calls"][0].args == {"message": "Done."}
+    assert len(deferred) == 1
+    assert deferred[0].name == "return_to_user"
+    assert deferred[0].call_id is None
+    assert deferred[0].use_next_user_message_as_result is True
 
 
 def test_main_tool_request_history_openai_shape() -> None:
@@ -594,7 +937,7 @@ def test_main_tool_request_history_openai_shape() -> None:
 
     class _FakeClient:
         def __init__(self) -> None:
-            self.history: list[tuple[str, str]] = []
+            self.history: list[dict[str, Any]] = []
 
         def tool_call_request_config(self, *, allowed_function_names: list[str]) -> dict[str, Any]:
             _ = allowed_function_names
@@ -620,30 +963,296 @@ def test_main_tool_request_history_openai_shape() -> None:
             _ = response
             return ""
 
+        def extract_thinking_summaries(self, response: _Response) -> list[str]:
+            _ = response
+            return []
+
         def extract_tool_calls(self, response: _Response) -> list[ToolCall]:
             function = response.choices[0].message.tool_calls[0].function
-            return [ToolCall(name=function.name, args=json.loads(function.arguments))]
+            return [
+                ToolCall(
+                    name=function.name,
+                    args=json.loads(function.arguments),
+                    call_id="call_123",
+                )
+            ]
 
-        def add_text(self, text: str, *, role: str = "user") -> None:
-            self.history.append((role, text))
+        def add_model_turn(
+            self,
+            *,
+            text: str,
+            thinking_summaries: list[Any],
+            tool_calls: list[ToolCall],
+        ) -> None:
+            self.history.append(
+                {
+                    "kind": "model_turn",
+                    "text": text,
+                    "thinking_summaries": thinking_summaries,
+                    "tool_calls": tool_calls,
+                }
+            )
 
     fake_client = _FakeClient()
-    _run_agent_until_handoff(
+    deferred = _run_agent_until_handoff(
         fake_client,  # type: ignore[arg-type]
         [return_to_user],
         auto_approve_tools=False,
     )
 
+    serialized_history = [
+        {
+            **entry,
+            "tool_calls": [
+                {"name": call.name, "args": call.args, "call_id": call.call_id}
+                for call in entry["tool_calls"]
+            ],
+        }
+        for entry in fake_client.history
+    ]
     _print_block(
         "main.tool_request_history_openai_shape",
         {
-            "history": fake_client.history,
+            "history": serialized_history,
         },
     )
-    assert len(fake_client.history) == 2
-    assert fake_client.history[0][0] == "model"
-    assert fake_client.history[0][1].startswith("[tool-request] return_to_user")
-    assert fake_client.history[1] == ("model", "Done from OpenAI.")
+    assert len(fake_client.history) == 1
+    assert fake_client.history[0]["kind"] == "model_turn"
+    assert fake_client.history[0]["text"] == ""
+    assert fake_client.history[0]["thinking_summaries"] == []
+    assert len(fake_client.history[0]["tool_calls"]) == 1
+    assert fake_client.history[0]["tool_calls"][0].name == "return_to_user"
+    assert fake_client.history[0]["tool_calls"][0].args == {"message": "Done from OpenAI."}
+    assert fake_client.history[0]["tool_calls"][0].call_id == "call_123"
+    assert len(deferred) == 1
+    assert deferred[0].name == "return_to_user"
+    assert deferred[0].call_id == "call_123"
+    assert deferred[0].use_next_user_message_as_result is True
+
+
+def test_main_deferred_tool_result_return_to_user() -> None:
+    from main import _apply_deferred_tool_results, _run_agent_until_handoff
+    from tools import return_to_user
+
+    class _FakeResponse:
+        pass
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.model_turns: list[dict[str, Any]] = []
+            self.tool_results: list[dict[str, Any]] = []
+
+        def tool_call_request_config(self, *, allowed_function_names: list[str]) -> dict[str, Any]:
+            _ = allowed_function_names
+            return {}
+
+        def generate(self, **kwargs: Any) -> _FakeResponse:
+            _ = kwargs
+            return _FakeResponse()
+
+        def extract_response_text(self, response: _FakeResponse) -> str:
+            _ = response
+            return ""
+
+        def extract_thinking_summaries(self, response: _FakeResponse) -> list[Any]:
+            _ = response
+            return []
+
+        def extract_tool_calls(self, response: _FakeResponse) -> list[ToolCall]:
+            _ = response
+            return [ToolCall(name="return_to_user", args={"message": "Done."}, call_id="call_ret")]
+
+        def add_model_turn(
+            self,
+            *,
+            text: str,
+            thinking_summaries: list[Any],
+            tool_calls: list[ToolCall],
+        ) -> None:
+            self.model_turns.append(
+                {
+                    "text": text,
+                    "thinking_summaries": thinking_summaries,
+                    "tool_calls": tool_calls,
+                }
+            )
+
+        def add_tool_result(
+            self,
+            *,
+            name: str,
+            result: str,
+            call_id: str | None,
+            role: str = "user",
+        ) -> None:
+            self.tool_results.append(
+                {
+                    "name": name,
+                    "result": result,
+                    "call_id": call_id,
+                    "role": role,
+                }
+            )
+
+    fake_client = _FakeClient()
+    deferred = _run_agent_until_handoff(
+        fake_client,  # type: ignore[arg-type]
+        [return_to_user],
+        auto_approve_tools=False,
+    )
+
+    consumed = _apply_deferred_tool_results(
+        fake_client,  # type: ignore[arg-type]
+        deferred,
+        next_user_message="who are you",
+    )
+
+    _print_block(
+        "main.deferred_tool_result_return_to_user",
+        {
+            "deferred": [
+                {
+                    "name": item.name,
+                    "call_id": item.call_id,
+                    "use_next_user_message_as_result": item.use_next_user_message_as_result,
+                }
+                for item in deferred
+            ],
+            "tool_results": fake_client.tool_results,
+        },
+    )
+
+    assert len(deferred) == 1
+    assert deferred[0].name == "return_to_user"
+    assert deferred[0].call_id == "call_ret"
+    assert deferred[0].use_next_user_message_as_result is True
+    assert consumed is True
+    assert fake_client.tool_results == [
+        {
+            "name": "return_to_user",
+            "result": "who are you",
+            "call_id": "call_ret",
+            "role": "user",
+        }
+    ]
+
+
+def test_main_deferred_tool_result_abort() -> None:
+    from main import _apply_deferred_tool_results, _run_agent_until_handoff
+    from tools import click, return_to_user
+
+    class _FakeResponse:
+        pass
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.model_turns: list[dict[str, Any]] = []
+            self.tool_results: list[dict[str, Any]] = []
+
+        def tool_call_request_config(self, *, allowed_function_names: list[str]) -> dict[str, Any]:
+            _ = allowed_function_names
+            return {}
+
+        def generate(self, **kwargs: Any) -> _FakeResponse:
+            _ = kwargs
+            return _FakeResponse()
+
+        def extract_response_text(self, response: _FakeResponse) -> str:
+            _ = response
+            return ""
+
+        def extract_thinking_summaries(self, response: _FakeResponse) -> list[Any]:
+            _ = response
+            return []
+
+        def extract_tool_calls(self, response: _FakeResponse) -> list[ToolCall]:
+            _ = response
+            return [ToolCall(name="click", args={"x": 0.1, "y": 0.2}, call_id="call_abort")]
+
+        def add_model_turn(
+            self,
+            *,
+            text: str,
+            thinking_summaries: list[Any],
+            tool_calls: list[ToolCall],
+        ) -> None:
+            self.model_turns.append(
+                {
+                    "text": text,
+                    "thinking_summaries": thinking_summaries,
+                    "tool_calls": tool_calls,
+                }
+            )
+
+        def add_tool_result(
+            self,
+            *,
+            name: str,
+            result: str,
+            call_id: str | None,
+            role: str = "user",
+        ) -> None:
+            self.tool_results.append(
+                {
+                    "name": name,
+                    "result": result,
+                    "call_id": call_id,
+                    "role": role,
+                }
+            )
+
+    import main as main_module
+
+    original_ask_tool_approval = main_module.ask_tool_approval
+    main_module.ask_tool_approval = lambda _prompt, default="deny": "abort"
+    try:
+        fake_client = _FakeClient()
+        deferred = _run_agent_until_handoff(
+            fake_client,  # type: ignore[arg-type]
+            [click, return_to_user],
+            auto_approve_tools=False,
+        )
+    finally:
+        main_module.ask_tool_approval = original_ask_tool_approval
+
+    assert fake_client.tool_results == []
+
+    consumed = _apply_deferred_tool_results(
+        fake_client,  # type: ignore[arg-type]
+        deferred,
+        next_user_message="continue",
+    )
+
+    _print_block(
+        "main.deferred_tool_result_abort",
+        {
+            "deferred": [
+                {
+                    "name": item.name,
+                    "call_id": item.call_id,
+                    "result_text": item.result_text,
+                    "use_next_user_message_as_result": item.use_next_user_message_as_result,
+                }
+                for item in deferred
+            ],
+            "tool_results": fake_client.tool_results,
+        },
+    )
+
+    assert len(deferred) == 1
+    assert deferred[0].name == "click"
+    assert deferred[0].call_id == "call_abort"
+    assert deferred[0].use_next_user_message_as_result is False
+    assert "User denied tool `click` and aborted this run" in deferred[0].result_text
+    assert consumed is False
+    assert fake_client.tool_results == [
+        {
+            "name": "click",
+            "result": deferred[0].result_text,
+            "call_id": "call_abort",
+            "role": "user",
+        }
+    ]
 
 
 def test_main_api_error_handling() -> None:
@@ -660,6 +1269,10 @@ def test_main_api_error_handling() -> None:
 
         def generate(self, **kwargs: Any):  # noqa: ANN003
             raise RuntimeError("simulated API failure")
+
+        def extract_thinking_summaries(self, response: Any) -> list[str]:
+            _ = response
+            return []
 
         def add_text(self, text: str, *, role: str = "user") -> None:
             raise AssertionError("add_text should not be called when generate fails")
