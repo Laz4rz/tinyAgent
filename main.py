@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from api_key import load_api_key
 from debug_recorder import DebugRecorder
-from model_client import BaseModelClient, build_model_client
+from model_client import BaseModelClient, ImageSettings, build_model_client
 from setup import (
     CONFIG_PATH,
     SYSTEM_PROMPT_PATH,
@@ -21,7 +22,7 @@ from setup import (
     reconfigure_session,
     save_session_config,
 )
-from tools import click, move_mouse, press_combo, return_to_user, type as type_text
+from tools import click, move_mouse, press_combo, return_to_user, screenshot as screenshot_tool, type as type_text
 from utils import (
     ask_tool_approval,
     emit_message,
@@ -67,8 +68,9 @@ PROVIDERS = [
     ProviderOption(key="google", label="Google Gemini"),
     ProviderOption(key="openai", label="OpenAI"),
 ]
-AVAILABLE_TOOLS: list[ToolFn] = [move_mouse, click, type_text, press_combo]
+AVAILABLE_TOOLS: list[ToolFn] = [move_mouse, click, type_text, screenshot_tool, press_combo]
 TOOL_REGISTRY: dict[str, ToolFn] = {fn.__name__: fn for fn in AVAILABLE_TOOLS}
+SCREENSHOT_IMAGE_SETTINGS = ImageSettings(scale=1.0, max_width=1280, max_height=720)
 
 
 @dataclass
@@ -143,6 +145,20 @@ def _load_provider_api_key(provider_key: str) -> str:
         secret_path=SHARED_SECRET_PATH,
         prompt=True,
     )
+
+
+def _process_tool_result(
+    tool_name: str,
+    tool_result: str,
+) -> tuple[str, str | None]:
+    if tool_name != screenshot_tool.__name__:
+        return tool_result, None
+
+    candidate = Path(tool_result.strip())
+    if not candidate.is_file():
+        return tool_result, None
+
+    return f"Captured screenshot: {candidate}", str(candidate)
 
 
 def _run_agent_until_handoff(
@@ -273,6 +289,10 @@ def _run_agent_until_handoff(
                     )
 
             if not aborted_by_user:
+                tool_result, attached_image_path = _process_tool_result(
+                    tool_name=name,
+                    tool_result=tool_result,
+                )
                 print_role("user", format_tool_result(name, tool_result))
                 client.add_tool_result(
                     name=name,
@@ -280,6 +300,24 @@ def _run_agent_until_handoff(
                     call_id=tool_call.call_id,
                     role="user",
                 )
+                if attached_image_path is not None:
+                    try:
+                        client.add_image(
+                            attached_image_path,
+                            role="user",
+                            settings=SCREENSHOT_IMAGE_SETTINGS,
+                        )
+                        print_role(
+                            "user",
+                            format_protocol_note(f"screenshot attached: {attached_image_path}"),
+                        )
+                    except Exception as exc:
+                        print_role(
+                            "user",
+                            format_protocol_note(
+                                f"screenshot captured but failed to attach: {exc}"
+                            ),
+                        )
 
             if aborted_by_user:
                 print_role("user", format_control_note("Execution paused. Waiting for user instruction."))

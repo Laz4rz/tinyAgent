@@ -30,6 +30,8 @@ _ANSI_RESET = "\033[0m"
 @dataclass
 class ImageSettings:
     scale: float = 0.25
+    max_width: int | None = None
+    max_height: int | None = None
     format: ImageFormat | None = None
     quality: int = 85
 
@@ -1024,11 +1026,29 @@ def _preprocess_image(data: bytes, *, mime_type: str, settings: ImageSettings) -
 
     if settings.scale <= 0:
         raise ValueError("Image scale must be > 0.")
+    if settings.max_width is not None and settings.max_width <= 0:
+        raise ValueError("Image max_width must be > 0 when provided.")
+    if settings.max_height is not None and settings.max_height <= 0:
+        raise ValueError("Image max_height must be > 0 when provided.")
+
+    has_target_resolution = settings.max_width is not None or settings.max_height is not None
+    if has_target_resolution and settings.scale != 1.0:
+        raise ValueError("Image scale cannot be combined with max_width/max_height target downscaling.")
 
     source = io.BytesIO(data)
     with Image.open(source) as image:
         image.load()
-        if settings.scale != 1.0:
+        if has_target_resolution:
+            width_ratio = settings.max_width / image.width if settings.max_width is not None else 1.0
+            height_ratio = settings.max_height / image.height if settings.max_height is not None else 1.0
+            resize_ratio = min(width_ratio, height_ratio, 1.0)
+            if resize_ratio < 1.0:
+                resized = (
+                    max(1, int(image.width * resize_ratio)),
+                    max(1, int(image.height * resize_ratio)),
+                )
+                image = image.resize(resized, Image.Resampling.LANCZOS)
+        elif settings.scale != 1.0:
             resized = (
                 max(1, int(image.width * settings.scale)),
                 max(1, int(image.height * settings.scale)),

@@ -1,5 +1,7 @@
 import time
 import sys
+import os
+import tempfile
 
 from .helpers import (
     modifier_keys,
@@ -62,6 +64,25 @@ def type(text: str, interval_ms: int = 0) -> str:
         return f"Successfully sent typed text ({len(text)} chars)"
     except Exception as exc:
         return f"Failed to type text: {exc}"
+
+
+def screenshot() -> str:
+    """Capture the current screen and save it as a temporary PNG file."""
+    try:
+        import pyautogui
+
+        fd, path = tempfile.mkstemp(prefix="tinyagent-shot-", suffix=".png")
+        os.close(fd)
+        try:
+            image = pyautogui.screenshot()
+            image.save(path)
+        except Exception:
+            if os.path.exists(path):
+                os.remove(path)
+            raise
+        return path
+    except Exception as exc:
+        return f"Failed to capture screenshot: {exc}"
 
 
 def press_combo(*keys: str, hold_ms: int = 0) -> str:
