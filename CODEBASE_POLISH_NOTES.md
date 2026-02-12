@@ -3,6 +3,8 @@
 ## What This File Is For
 This file is a durable playbook for how to work on this project together.
 
+Quick-start: `IMPLEMENTATION_RULES.md` is the concise high-level version; this file is the detailed reference.
+
 It should capture:
 1. Engineering style preferences.
 2. Architectural intent and non-goals.
@@ -40,6 +42,10 @@ Use these defaults for future work unless explicitly overridden.
 3. Small, named hook points for true extension seams.
 4. Code that a learner can read top-to-bottom without guessing hidden behavior.
 
+## Documentation Style
+1. Keep docs concise and high-signal (quick intro, quickstart, core loop, commands, code map).
+2. Prefer practical, example-first README structure with minimal prose.
+
 ## Architecture Direction
 
 ### Provider Model
@@ -72,6 +78,8 @@ Current policy:
 1. Auto-downsize images to 25% dimensions by default.
 2. Allow explicit override via settings when needed.
 3. Keep a provider hook for provider-specific image preprocessing paths.
+4. Support explicit target-resolution downscaling (`max_width`/`max_height`) for cases where fixed visual size is preferable to percentage scaling.
+5. For runtime screenshot attachments, cap images to sub-FHD resolution (currently `1280x720`) so visual context stays readable without oversized payloads.
 
 ### Tools Module Convention
 All callable tools should live under a single package: `tools/`.
@@ -86,6 +94,7 @@ Current preference:
 7. Any keyboard tool that calls key-down events must guarantee key-up cleanup inside the same tool call, including failure/retry paths.
 8. For low-level input tools (for example keyboard/mouse dispatch), success text should describe dispatched input, not guarantee the external app/OS effect happened.
 9. Keep a dedicated text-entry tool (`type`) distinct from shortcut/chord tools (`press_combo`) so model intent stays explicit.
+10. Keep a dedicated screenshot tool so the model can refresh visual context; when it succeeds, append the captured image to conversation history as a user image message.
 
 ### Runtime Loop
 For interactive computer-use sessions:
@@ -181,6 +190,7 @@ Before implementing, align quickly on:
 2. Whether new complexity improves teachability.
 3. Whether a fail-fast approach is acceptable for the call site.
 4. As work progresses, update this file when new observations clarify what the user actually wants and what most directly supports the project goal.
+5. When asked to create "implementation rules" documentation, default to project-agnostic guidance unless explicitly asked for repository-specific rules.
 
 If uncertain, bias toward the simpler implementation first, then iterate.
 

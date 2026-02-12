@@ -103,6 +103,7 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("main_tool_approval_abort", test_main_tool_approval_abort),
         ("main_api_error_handling", test_main_api_error_handling),
         ("main_tool_request_history", test_main_tool_request_history),
+        ("main_screenshot_tool_attaches_image", test_main_screenshot_tool_attaches_image),
         ("main_model_multi_output_grouped", test_main_model_multi_output_grouped),
         ("main_tool_request_history_openai_shape", test_main_tool_request_history_openai_shape),
         ("main_deferred_tool_result_return_to_user", test_main_deferred_tool_result_return_to_user),
@@ -128,7 +129,11 @@ def _all_tests() -> list[tuple[str, Any]]:
         ("history_visualization_text_and_image", test_history_visualization_text_and_image),
         ("return_to_user_tool", test_return_to_user_tool),
         ("type_tool", test_type_tool),
+        ("screenshot_tool", test_screenshot_tool),
         ("image_auto_downsize_default", test_image_auto_downsize_default),
+        ("image_target_resolution_downscale", test_image_target_resolution_downscale),
+        ("image_target_resolution_no_upscale", test_image_target_resolution_no_upscale),
+        ("image_target_resolution_conflict_with_scale", test_image_target_resolution_conflict_with_scale),
         ("image_preprocess_settings", test_image_preprocess_settings),
         ("press_combo_releases_on_failsafe", test_press_combo_releases_on_failsafe),
         ("press_combo_stuck_key_recovery", test_press_combo_stuck_key_recovery),
@@ -171,12 +176,13 @@ def _select_tests(
 
 
 def _default_tools() -> list[dict]:
-    from tools import click, move_mouse, press_combo, return_to_user, type as type_tool
+    from tools import click, move_mouse, press_combo, return_to_user, screenshot, type as type_tool
 
     return [
         make_tool_schema(move_mouse),
         make_tool_schema(click),
         make_tool_schema(type_tool),
+        make_tool_schema(screenshot),
         make_tool_schema(press_combo),
         make_tool_schema(return_to_user),
     ]
@@ -224,6 +230,11 @@ def _gemini_tools() -> list[object]:
                         },
                         ["text"],
                     ),
+                ),
+                types.FunctionDeclaration(
+                    name="screenshot",
+                    description="Capture the current screen and save it as a temporary PNG file.",
+                    parameters=obj({}, []),
                 ),
                 types.FunctionDeclaration(
                     name="press_combo",
@@ -385,7 +396,7 @@ def test_api_key_shared_secret() -> None:
 
 def test_session_config_roundtrip() -> None:
     from setup import ProviderOption, SessionConfig, load_session_config, save_session_config
-    from tools import click, move_mouse, press_combo, type as type_tool
+    from tools import click, move_mouse, press_combo, screenshot, type as type_tool
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         config_path = Path(tmp_dir) / ".tinyagent.config.json"
@@ -396,7 +407,7 @@ def test_session_config_roundtrip() -> None:
             tool_strategy="ask",
         )
         providers = [ProviderOption(key="google", label="Google Gemini")]
-        available_tools = [move_mouse, click, type_tool, press_combo]
+        available_tools = [move_mouse, click, type_tool, screenshot, press_combo]
         tool_registry = {fn.__name__: fn for fn in available_tools}
 
         save_session_config(config_path, config)
@@ -1070,6 +1081,141 @@ def test_main_tool_request_history() -> None:
     assert deferred[0].use_next_user_message_as_result is True
 
 
+def test_main_screenshot_tool_attaches_image() -> None:
+    import io
+    from contextlib import redirect_stdout
+
+    from main import _run_agent_until_handoff
+    from tools import return_to_user
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        screenshot_path = Path(tmp.name)
+        tmp.write(b"fake-image")
+
+    def screenshot() -> str:
+        return str(screenshot_path)
+
+    class _FakeResponse:
+        pass
+
+    class _FakeClient:
+        def __init__(self) -> None:
+            self.model_turns: list[dict[str, Any]] = []
+            self.tool_results: list[dict[str, Any]] = []
+            self.image_calls: list[dict[str, Any]] = []
+
+        def tool_call_request_config(self, *, allowed_function_names: list[str]) -> dict[str, Any]:
+            _ = allowed_function_names
+            return {}
+
+        def generate(self, **kwargs: Any) -> _FakeResponse:
+            _ = kwargs
+            return _FakeResponse()
+
+        def extract_response_text(self, response: _FakeResponse) -> str:
+            _ = response
+            return ""
+
+        def extract_thinking_summaries(self, response: _FakeResponse) -> list[Any]:
+            _ = response
+            return []
+
+        def extract_tool_calls(self, response: _FakeResponse) -> list[ToolCall]:
+            _ = response
+            return [
+                ToolCall(name="screenshot", args={}, call_id="call_shot"),
+                ToolCall(name="return_to_user", args={"message": "Done."}, call_id="call_ret"),
+            ]
+
+        def add_model_turn(
+            self,
+            *,
+            text: str,
+            thinking_summaries: list[Any],
+            tool_calls: list[ToolCall],
+        ) -> None:
+            self.model_turns.append(
+                {
+                    "text": text,
+                    "thinking_summaries": thinking_summaries,
+                    "tool_calls": tool_calls,
+                }
+            )
+
+        def add_tool_result(
+            self,
+            *,
+            name: str,
+            result: str,
+            call_id: str | None,
+            role: str = "user",
+        ) -> None:
+            self.tool_results.append(
+                {
+                    "name": name,
+                    "result": result,
+                    "call_id": call_id,
+                    "role": role,
+                }
+            )
+
+        def add_image(self, path: str | Path, *, role: str = "user", **kwargs: Any) -> None:
+            self.image_calls.append(
+                {
+                    "path": str(path),
+                    "role": role,
+                    "kwargs": kwargs,
+                }
+            )
+
+    fake_client = _FakeClient()
+    out = io.StringIO()
+    try:
+        with redirect_stdout(out):
+            deferred = _run_agent_until_handoff(
+                fake_client,  # type: ignore[arg-type]
+                [screenshot, return_to_user],
+                auto_approve_tools=True,
+            )
+    finally:
+        screenshot_path.unlink(missing_ok=True)
+
+    rendered = _strip_ansi(out.getvalue())
+    _print_block(
+        "main.screenshot_tool_attaches_image",
+        {
+            "printed": rendered.strip(),
+            "tool_results": fake_client.tool_results,
+            "image_calls": fake_client.image_calls,
+            "deferred": [
+                {
+                    "name": item.name,
+                    "call_id": item.call_id,
+                    "use_next_user_message_as_result": item.use_next_user_message_as_result,
+                }
+                for item in deferred
+            ],
+        },
+    )
+
+    assert len(fake_client.tool_results) == 1
+    assert fake_client.tool_results[0]["name"] == "screenshot"
+    assert "Captured screenshot:" in fake_client.tool_results[0]["result"]
+    assert fake_client.tool_results[0]["call_id"] == "call_shot"
+    assert len(fake_client.image_calls) == 1
+    assert fake_client.image_calls[0]["path"] == str(screenshot_path)
+    assert fake_client.image_calls[0]["role"] == "user"
+    settings = fake_client.image_calls[0]["kwargs"]["settings"]
+    assert isinstance(settings, ImageSettings)
+    assert settings.scale == 1.0
+    assert settings.max_width == 1280
+    assert settings.max_height == 720
+    assert "PROTOCOL: screenshot attached:" in rendered
+    assert len(deferred) == 1
+    assert deferred[0].name == "return_to_user"
+    assert deferred[0].call_id == "call_ret"
+
+
 def test_main_model_multi_output_grouped() -> None:
     import io
     from contextlib import redirect_stdout
@@ -1533,9 +1679,9 @@ def test_main_api_error_handling() -> None:
 
 def test_main_tool_selection_parse() -> None:
     from setup import parse_tool_selection
-    from tools import click, move_mouse, press_combo, type as type_tool
+    from tools import click, move_mouse, press_combo, screenshot, type as type_tool
 
-    available_tools = [move_mouse, click, type_tool, press_combo]
+    available_tools = [move_mouse, click, type_tool, screenshot, press_combo]
     tool_registry = {fn.__name__: fn for fn in available_tools}
     selected = parse_tool_selection(
         "1,click",
@@ -1625,6 +1771,48 @@ def test_type_tool() -> None:
     assert write_calls == [{"text": "abc", "interval": 0.12}]
 
 
+def test_screenshot_tool() -> None:
+    from tools.tools import screenshot
+
+    fake = types.ModuleType("pyautogui")
+    saved_paths: list[str] = []
+
+    class _Shot:
+        def save(self, path: str) -> None:
+            Path(path).write_bytes(b"png-bytes")
+            saved_paths.append(path)
+
+    def _screenshot() -> _Shot:
+        return _Shot()
+
+    fake.screenshot = _screenshot
+
+    original = sys.modules.get("pyautogui")
+    sys.modules["pyautogui"] = fake
+    try:
+        result = screenshot()
+    finally:
+        if original is None:
+            del sys.modules["pyautogui"]
+        else:
+            sys.modules["pyautogui"] = original
+
+    path = Path(result)
+    _print_block(
+        "tool.screenshot",
+        {
+            "result": result,
+            "exists": path.exists(),
+            "saved_paths": saved_paths,
+        },
+    )
+
+    assert path.exists()
+    assert result in saved_paths
+    assert path.read_bytes() == b"png-bytes"
+    path.unlink(missing_ok=True)
+
+
 def test_image_preprocess_settings() -> None:
     try:
         from PIL import Image
@@ -1705,6 +1893,122 @@ def test_image_auto_downsize_default() -> None:
         assert (width, height) == (160, 90)
         assert part.mime_type == "image/png"
         assert image_format == "PNG"
+    finally:
+        if image_path is not None:
+            image_path.unlink(missing_ok=True)
+
+
+def test_image_target_resolution_downscale() -> None:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise SkipTest("Pillow is required for image preprocessing tests") from exc
+
+    client = _StubClient()
+    image_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            image_path = Path(tmp.name)
+
+        base_image = Image.new("RGB", (2560, 1440), (30, 100, 210))
+        base_image.save(image_path)
+
+        client.add_image(
+            image_path,
+            settings=ImageSettings(scale=1.0, max_width=1280, max_height=720),
+        )
+
+        part = client.history[-1].parts[0]
+        with Image.open(io.BytesIO(part.data)) as processed:
+            width, height = processed.size
+
+        _print_block(
+            "image.target_resolution_downscale",
+            {
+                "size": [width, height],
+                "mime_type": part.mime_type,
+            },
+        )
+
+        assert (width, height) == (1280, 720)
+    finally:
+        if image_path is not None:
+            image_path.unlink(missing_ok=True)
+
+
+def test_image_target_resolution_no_upscale() -> None:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise SkipTest("Pillow is required for image preprocessing tests") from exc
+
+    client = _StubClient()
+    image_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            image_path = Path(tmp.name)
+
+        base_image = Image.new("RGB", (640, 360), (180, 80, 40))
+        base_image.save(image_path)
+
+        client.add_image(
+            image_path,
+            settings=ImageSettings(scale=1.0, max_width=1280, max_height=720),
+        )
+
+        part = client.history[-1].parts[0]
+        with Image.open(io.BytesIO(part.data)) as processed:
+            width, height = processed.size
+
+        _print_block(
+            "image.target_resolution_no_upscale",
+            {
+                "size": [width, height],
+                "mime_type": part.mime_type,
+            },
+        )
+
+        assert (width, height) == (640, 360)
+    finally:
+        if image_path is not None:
+            image_path.unlink(missing_ok=True)
+
+
+def test_image_target_resolution_conflict_with_scale() -> None:
+    try:
+        from PIL import Image
+    except ModuleNotFoundError as exc:
+        raise SkipTest("Pillow is required for image preprocessing tests") from exc
+
+    client = _StubClient()
+    image_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            image_path = Path(tmp.name)
+
+        Image.new("RGB", (1200, 800), (60, 60, 60)).save(image_path)
+
+        try:
+            client.add_image(
+                image_path,
+                settings=ImageSettings(scale=0.5, max_width=1280, max_height=720),
+            )
+        except ValueError as exc:
+            error_text = str(exc)
+        else:
+            raise AssertionError("Expected ValueError when combining scale with target resolution.")
+
+        _print_block(
+            "image.target_resolution_conflict_with_scale",
+            {
+                "error": error_text,
+            },
+        )
+
+        assert "cannot be combined" in error_text
     finally:
         if image_path is not None:
             image_path.unlink(missing_ok=True)
@@ -1987,6 +2291,7 @@ def test_tool_schemas() -> None:
     _print_block("tool_schemas", schemas)
     names = [schema["name"] for schema in schemas]
     assert "type" in names
+    assert "screenshot" in names
 
 
 def test_gemini_tool_click() -> None:
